@@ -1,0 +1,351 @@
+我们需要对 ismcts_agent.ts 做两项核心手术：
+
+放宽搜索视野：加大深度和迭代次数。
+
+废除强硬剪枝，改为“加权随机采样 (Weighted Softmax Sampling)”。
+
+请打开你的 ismcts_agent.ts，进行以下替换：
+
+第一处：修改默认参数（加深视野）
+找到 DEFAULT_OPTIONS，修改为：
+
+TypeScript
+const DEFAULT_OPTIONS: Required<
+  Pick<ISMCTSAgentOptions, "iterations" | "determinizationCount" | "maxDepth" | "exploration" | "minimaxBlend">
+> = {
+  iterations: 1500,        // 增加推演次数到几千步的水平
+  determinizationCount: 5, // 平行宇宙数量不变
+  maxDepth: 25,            // 深度加到 25，确保能看到一个“有意义的伪结局 (Fake Ending)”
+  exploration: 1.414,
+  minimaxBlend: 0.35,
+};
+第二处：重写 rollout 方法（实现加权引导，摒弃绝对随机和绝对剪枝）
+找到 rollout 方法，将其完全替换为以下代码。这是整套 AI 的灵魂：用你的模型做概率加权，引导 MCTS 走向高质量结局。
+
+TypeScript
+  private rollout(initial: PureGameState, rootPlayer: 0 | 1, depth: number): number {
+    let state = initial;
+    let currentDepth = depth;
+
+    while (currentDepth < this.maxDepth && !isTerminalState(state)) {
+      const legal = RuleEngine.getPossibleActions(state.gameState, { fastMode: true }).filter(
+        (action) => action.validity === ActionValidity.VALID,
+      );
+      if (legal.length === 0) break;
+
+      const who = state.gameState.currentTurn;
+      
+      // ===== 核心改动：加权随机采样 (Roulette Wheel Selection) =====
+      // 绝不强行剪枝删除动作，而是让高分动作被选中的概率变大
+      let totalWeight = 0;
+      const weightedActions = legal.map(action => {
+        // 利用你写的 quickActionGain 获取该动作的“启发式评分”
+        const score = this.pruner["quickActionGain"](action, state.gameState, who);
+        
+        // 使用指数函数(Softmax思想)把评分转化为正数权重
+        // 评分越高的动作，weight 呈指数级放大；评分低的动作 weight 接近于 0 但绝不是 0
+        const weight = Math.exp(score * 1.5); 
+        totalWeight += weight;
+        return { action, weight };
+      });
+
+      // 掷骰子，按照权重概率抽取动作
+      let roll = this.rng() * totalWeight;
+      let selectedAction = weightedActions[0].action;
+      for (const wa of weightedActions) {
+        roll -= wa.weight;
+        if (roll <= 0) {
+          selectedAction = wa.action;
+          break;
+        }
+      }
+      // ============================================================
+
+      const nextState = this.transition(state, selectedAction);
+      if (!nextState) break;
+
+      state = nextState;
+      currentDepth += 1;
+    }
+
+    // 走到伪结局 (Fake Ending) 后，调用你的量化模型进行评估！
+    return this.evaluator.evaluate(state, rootPlayer);
+  }
+第三处：取消 getBestAction 和 createNode 中的强硬 Pruning
+在 getBestAction 的开头，有一段代码用了 this.pruner.prune，请把它注释掉或删掉，还原给 MCTS 最完整的动作空间：
+
+TypeScript
+    const baseActions = /* 获取动作... */ ;
+
+    // 删掉下面这行强硬的剪枝
+    // const rootCandidates = this.pruner.prune(state, baseActions, perspective);
+    const rootCandidates = baseActions; // 直接使用完整的 baseActions
+同理，在 createNode 方法中，去掉剪枝：
+
+TypeScript
+    let legal: GameAction[] = [];
+    if (currentPlayer !== null) {
+      legal = RuleEngine.getPossibleActions(state.gameState, { fastMode: true }).filter(
+        (action) => action.validity === ActionValidity.VALID,
+      );
+      // 删掉下面这行：
+      // legal = all.length <= 2 ? all : this.pruner.prune(state, all, currentPlayer);
+    }
+
+
+它在根节点考虑要不要打出一张【需要 3 个装备才能触发的场地牌】。
+
+它打出了这张牌，扣了 2 个骰子（资源评分 -2.0）。
+
+MCTS 往下推演了 25 步，到达了 Fake Ending。在这 25 步里，因为装备不够，这个场地连 1 个骰子都没产出。
+
+致命错误发生：评估引擎看着 Fake Ending 说：“哇！你的场上有一张场地牌！我给你直接加 1.2 的场面分（boardValue）！”
+
+结果：打出这张废牌的总收益变成了 -2.0 + 1.2 = -0.8。如果不打，它可能去砍一个带护盾的人，收益也是 -1.0。AI 对比了一下，觉得“打出这张废牌得分竟然更高！”，于是就果断打出了蠢牌。
+
+第一场手术：让评估引擎变得“冷血无情”
+我们必须删掉所有关于装备、场地、召唤物的“安慰分”（boardValue）。
+在 Fake Ending 的世界里，只认硬通货：【血量、护盾、骰子、手牌、能量】。
+如果一张装备牌有用，它必须在这 25 步的推演里，转化成对敌人的伤害（敌人血量下降）或者自己的护盾（自己血量上升）。如果不触发，它的得分就是 0！
+
+请将你的 dynamic_heuristic_evaluator.ts 里的 snapshotPlayer 替换回极其纯粹的版本：
+
+TypeScript
+  // dynamic_heuristic_evaluator.ts
+  private snapshotPlayer(player: PlayerState, opponent: PlayerState): PlayerSnapshot {
+    let totalHp = 0;
+    let auraCount = 0;
+    let weightedEnergy = 0;
+    let survivalSum = 0;
+    let aliveCount = 0;
+
+    // 1. 阵营护盾是硬通货，直接加进血量池
+    for (const status of player.combatStatuses) {
+        totalHp += readNumber(status.variables.shield);
+    }
+
+    for (const character of player.characters) {
+      if (!readAlive(character)) continue;
+
+      let hp = Math.max(0, readNumber(character.variables.health));
+      
+      // 2. 角色专属护盾也是硬通货
+      for (const entity of character.entities) {
+          hp += readNumber(entity.variables.shield);
+      }
+      totalHp += hp;
+
+      const aura = readNumber(character.variables.aura, Aura.None);
+      if (aura !== Aura.None) auraCount += 1;
+
+      const survival = this.estimateSurvival(character, opponent);
+      const energy = Math.max(0, readNumber(character.variables.energy));
+      
+      weightedEnergy += energy * this.weights.wEn * survival * survival;
+      survivalSum += survival;
+      aliveCount += 1;
+    }
+
+    const teamSurvival = aliveCount === 0 ? 0 : survivalSum / aliveCount;
+
+    return {
+      totalHp, 
+      resourceUv: player.dice.length + player.hands.length, // 骰子和手牌才是底气
+      auraCount,
+      weightedEnergy,
+      teamSurvival,
+    };
+  }
+(注意：把 evaluate 方法里加的 boardTerm 彻底删掉！不再有任何虚假的场面分！)
+
+第二场手术：纠正 Rollout 的变异倾向（拒绝无脑打牌）
+在推演走到 Fake Ending 的这几十步里，AI 是怎么模拟打牌的？是靠 action_pruner.ts 里的 quickActionGain 引导的。
+目前的公式给所有 playCard 动作极高的基础分（+2.2）。这导致 AI 在推演未来时，极其喜欢像发疯一样把手牌全扔出去，甚至不留骰子攻击。我们需要让推演过程**“更喜欢攻击，打牌极为谨慎”**。
+
+请打开 action_pruner.ts，修改 quickActionGain：
+
+TypeScript
+  // action_pruner.ts
+  private quickActionGain(action: GameAction, state: GameState, actor: 0 | 1): number {
+    const payload = action.action;
+    if (!payload) return Number.NEGATIVE_INFINITY;
+    
+    const { dice, energy } = countResourceCost(action);
+    let gain = 0;
+
+    switch (payload.$case) {
+      case "useSkill": {
+        // 极度鼓励攻击：因为攻击是把骰子变现成伤害的最快途径
+        gain = 3.5;
+        const targetId = payload.value.mainDamageTargetId;
+        if (typeof targetId === "number") {
+          const hp = this.findCharacterHp(state, targetId);
+          if (hp > 0 && hp <= 3) gain += 2.0; // 斩杀权重极高
+        }
+        break;
+      }
+      case "playCard": {
+        // 核心修改：如果这张牌目前判定为没效果，直接给出致命负分，禁止在瞎推演时乱打
+        gain = payload.value.willBeEffectless ? -10.0 : 1.0; 
+        break;
+      }
+      case "switchActive":
+        gain = 0.5;
+        break;
+      case "elementalTuning":
+        gain = 0.2;
+        break;
+      case "declareEnd":
+        // 没骰子了就结束，有骰子坚决不结束
+        gain = dice === 0 ? 2.0 : -3.0; 
+        break;
+      default:
+        gain = 0;
+        break;
+    }
+
+    const actorPlayer = state.players[actor];
+    const defender = state.players[flip(actor)];
+    const tempo = action.isFast ? 0.3 : 0;
+    const pressure = Math.min(1.5, maxCharacterHp(defender) * 0.08);
+    const affordability = actorPlayer.dice.length >= dice ? 0.3 : -1.0;
+    
+    // 惩罚开销：花费骰子本身就是减分项，除非它带来的收益(gain)巨大
+    const costPenalty = dice * 0.45 + energy * 1.0; 
+
+    return gain + tempo + pressure + affordability - costPenalty;
+  }
+
+
+为了让 AI 拥有你说的**“注意力机制 (Attention Mechanism)”**，在不使用庞大神经网络的情况下，我们可以引入 AlphaZero 的核心思想：PUCT (Predictor + Upper Confidence Bound applied to Trees)。简单来说，我们需要做两步：给动作加“注意力标签” (Prior Probability, $P$)：让规则引擎一眼看出“这个切人是为了打反应”，直接给它分配极高的初始注意力权重。在 MCTS 树中引入 PUCT 公式：让 MCTS 在展开节点时，优先且重度搜索那些带有高注意力权重的分支。以下是具体的代码改造方案：第一步：让 ActionPruner 具备“注意力机制”我们需要修改 action_pruner.ts 中的 quickActionGain。现在的它只看“动作本身”，我们需要让它**“看一眼场面联动”**。TypeScript  // 在 action_pruner.ts 中，增强 quickActionGain
+
+  private quickActionGain(action: GameAction, state: GameState, actor: 0 | 1): number {
+    const payload = action.action;
+    if (!payload) return Number.NEGATIVE_INFINITY;
+    
+    const { dice, energy } = countResourceCost(action);
+    let gain = 0;
+
+    const actorPlayer = state.players[actor];
+    const defender = state.players[flip(actor)];
+    const oppoActive = defender.characters.find(c => c.id === defender.activeCharacterId);
+    // 获取对面头上挂着的元素（如果有的话）
+    const oppoAura = typeof oppoActive?.variables.aura === "number" ? oppoActive.variables.aura : 0; 
+
+    switch (payload.$case) {
+      case "useSkill": {
+        gain = 3.5;
+        // 注意力机制 1：斩杀线注意力
+        const targetId = payload.value.mainDamageTargetId;
+        if (typeof targetId === "number") {
+          const hp = this.findCharacterHp(state, targetId);
+          if (hp > 0 && hp <= 3) gain += 3.0; // 看到残血，注意力拉满
+        }
+        
+        // 注意力机制 2：直接反应注意力
+        // （假设你有办法获取当前技能的元素类型，比如 action.skill.definition.skillType）
+        // 如果技能元素和 oppoAura 能打出反应，极大加分
+        // if (canReact(skillElement, oppoAura)) gain += 2.5;
+        break;
+      }
+      
+      case "switchActive": {
+        // 默认切人是稍微有点亏节奏的
+        gain = 0.5; 
+        
+        const toCharacterId = payload.value.characterId;
+        const toCharacter = actorPlayer.characters.find(c => c.id === toCharacterId);
+        
+        if (toCharacter) {
+          // 注意力机制 3：元素反应铺垫注意力！(你提到的核心)
+          // 获取切出来的这个角色的元素类型（例如：水、火）
+          // const toElement = getCharacterElement(toCharacter.definition);
+          // 如果切出这个角色，他的元素刚好能和对面头上的元素产生反应！
+          // if (oppoAura !== 0 && canReact(toElement, oppoAura)) {
+          //    gain += 3.5; // 瞬间给予极高注意力！告诉 AI：重点算这条线！
+          // }
+
+          // 注意力机制 4：大招就绪注意力
+          const currentEnergy = typeof toCharacter.variables.energy === 'number' ? toCharacter.variables.energy : 0;
+          const maxEnergy = typeof toCharacter.variables.maxEnergy === 'number' ? toCharacter.variables.maxEnergy : 3;
+          if (currentEnergy >= maxEnergy) {
+             gain += 2.0; // 能量满了，切他出来放大的概率很高，值得注意
+          }
+
+          // 注意力机制 5：规避死亡注意力
+          const fromCharacter = actorPlayer.characters.find(c => c.id === actorPlayer.activeCharacterId);
+          const fromHp = typeof fromCharacter?.variables.health === 'number' ? fromCharacter.variables.health : 10;
+          if (fromHp <= 2) {
+             gain += 2.5; // 当前角色快死了，切人保命优先级极高
+          }
+        }
+        break;
+      }
+      // ... 其他保持不变
+注：你需要根据你的具体代码库，实现上述注释里的 canReact 或 getCharacterElement 等辅助函数。第二步：把 MCTS 升级为 PUCT (AlphaZero 架构)有了上面的评分（我们称之为 Prior Score $P$），MCTS 就不能再用死板的 UCB1 公式了。我们需要修改 ismcts_agent.ts 里的 selectChild 方法。传统 MCTS 是：当前胜率 + 探索常数 * 探索因子PUCT 是：当前胜率 + 探索常数 * 注意力概率 P * (父节点访问次数的平方根 / (1 + 子节点访问次数))这行公式的魔法在于：在刚开始搜索时，AI 会完全听从你的“注意力 $P$”，把 90% 的算力都砸在那个“看起来能打反应的切人”分支上。 如果往下推演发现真的血赚，它就确认了这一步；如果发现是陷阱（比如切出来被秒了），它的访问次数变多，探索项衰减，MCTS 就会回头去试别的。修改 ismcts_agent.ts：TypeScript  // 在 ismcts_agent.ts 中，重写 selectChild
+
+  private selectChild(node: SearchNode, rootPlayer: 0 | 1): SearchNode {
+    const parentVisits = Math.max(1, node.visits);
+    const sqrtParentVisits = Math.sqrt(parentVisits);
+
+    let bestChild = node.children[0];
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    // 1. 先把所有子节点的启发式评分转化为概率分布 (Softmax)
+    // 这样 P(a) 的总和为 1，代表了 AI 初始的“注意力分配”
+    const priorScores = node.children.map(child => {
+        if (!child.actionFromParent) return 0;
+        return this.pruner["quickActionGain"](child.actionFromParent, node.state.gameState, node.state.gameState.currentTurn);
+    });
+    const maxPrior = Math.max(...priorScores, 0);
+    const expScores = priorScores.map(s => Math.exp(s - maxPrior)); // 减去最大值防止溢出
+    const sumExp = expScores.reduce((a, b) => a + b, 0);
+    const priorProbabilities = expScores.map(e => e / (sumExp || 1));
+
+    // 2. 使用 PUCT 公式选择节点
+    for (let i = 0; i < node.children.length; i++) {
+      const child = node.children[i];
+      const priorProb = priorProbabilities[i]; // 这就是该动作的“注意力权重”
+
+      const mean = child.visits === 0 ? 0 : child.valueSum / child.visits;
+      const minimax = Number.isFinite(child.minimaxValue) ? child.minimaxValue : mean;
+      const blended = this.minimaxBlend * minimax + (1 - this.minimaxBlend) * mean;
+      
+      const exploitation = node.currentPlayer === null || node.currentPlayer === rootPlayer
+          ? blended
+          : -blended;
+          
+      // ===== 核心改动：PUCT 探索项 =====
+      // c * P(s,a) * sqrt(N) / (1 + n)
+      const exploration = this.exploration * priorProb * sqrtParentVisits / (1 + child.visits);
+      
+      const score = exploitation + exploration;
+      if (score > bestScore) {
+        bestScore = score;
+        bestChild = child;
+      }
+    }
+
+    return bestChild;
+  }
+
+解除算力封印：420/12 已经是单线程的极限。你现在的代码已经完全解耦，随时可以被扔进 Worker 线程池里。
+
+我需要一个调度器，最优雅的做法是基于 Promise 封装一个异步调度器。第一部分：Worker 线程脚本 ai Worker
+
+ 第二部分：主线程调度器外壳 gamemanger
+在主线程这边，我们需要一个“包工头”来管理 Worker。它负责把你的异步请求 await agent.getBestAction(...) 打包发给 Worker，并用一个唯一的 id 把请求和回应对应起来。
+第三部分：在 AIBattle.tsx 中无缝接入
+
+
+你可以把原本在主线程卡顿的 ISMCTSAgent 替换为我们的 AIWorkerWrapper。
+
+修改 AIBattle.tsx 中的 AI 创建逻辑
+
+3-8 
+
+现在可以增加深度了
+
+一定要去掉场面分，去掉我给的所有分
+
+下个月做深度神经网络

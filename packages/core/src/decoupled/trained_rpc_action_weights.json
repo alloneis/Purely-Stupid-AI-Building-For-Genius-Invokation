@@ -1,0 +1,38 @@
+{
+  "generatedAt": "2026-02-28T02:57:10.331Z",
+  "version": "v6.4.0",
+  "bestScore": 0,
+  "config": {
+    "iterations": 1,
+    "populationSize": 2,
+    "eliteSize": 1,
+    "battlesPerCandidate": 1
+  },
+  "weights": {
+    "playCard": 120,
+    "useSkill": 100,
+    "switchActive": 60,
+    "elementalTuning": 20,
+    "declareEnd": -1000,
+    "invalidAction": -500,
+    "fastActionBonus": 10,
+    "diceCostPenalty": 1
+  },
+  "history": [
+    {
+      "iteration": 1,
+      "bestScore": 0,
+      "averageScore": -0.25,
+      "bestWeights": {
+        "playCard": 120,
+        "useSkill": 100,
+        "switchActive": 60,
+        "elementalTuning": 20,
+        "declareEnd": -1000,
+        "invalidAction": -500,
+        "fastActionBonus": 10,
+        "diceCostPenalty": 1
+      }
+    }
+  ]
+}

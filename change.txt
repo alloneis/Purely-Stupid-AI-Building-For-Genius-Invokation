@@ -1,0 +1,82 @@
+修改了mutor的输出逻辑
+change to don't depend rpc only return the flush 
+完成内容：
+
+在 StateMutator 里加入了“先记 patch，后统一 flush”的机制
+
+新增 patchDelivery: "immediate" | "deferred" 配置（默认 immediate）
+新增 patch 队列和 API：recordPatches/getStagedPatches/drainStagedPatches/getAllRecordedPatches
+notify/notifyAndPause 会统一带上队列里的 patch 一起输出
+代码位置：
+mutator.ts (line 116)
+mutator.ts (line 223)
+mutator.ts (line 287)
+mutator.ts (line 337)
+把几个“改状态+立刻 notify mutation”的方法改成“改状态+stage patch”
+
+apply/heal/damage
+postSwitchActive/postChooseActive
+代码位置：
+mutator.ts (line 460)
+mutator.ts (line 555)
+mutator.ts (line 661)
+mutator.ts (line 1213)
+mutator.ts (line 1436)
+新增 PureStateMutator（你给的思路版）
+
+仅做状态变更 + 记录 patch，不触发外部 IO
+提供 applyDamage/getPatches/drainPatches/getNewState
+代码位置：
+mutator.ts (line 1458)
+从 core 顶层导出新能力
+
+index.ts (line 32)
+验证结果：
+
+packages/core 类型检查通过：bun run check
+packages/core 构建通过：bun run build
+运行验证通过：PureStateMutator.applyDamage 后 HP 从 10 -> 8，patch 数 1
+下一步建议（继续你这条路）：
+
+把 reroll/switchHands 里的 this.notify() 也改成可 defer（由外层统一 flush）。
+把 executeInlineSkill/resetState 这条链加上“纯模式分支”，让 skill 计算阶段彻底不触发外部通知。
+
+新增 RuleEngine（纯内存、无 IO）
+文件: rule_engine.ts
+
+核心入口：RuleEngine.execute(initialState, action, opt)
+使用 StateMutator({ silent: true, patchDelivery: "deferred" }) 运行纯模式
+实现了事件收敛循环（stability loop）：持续消费 pendingEvents 直到为空
+内置阵亡/游戏结束处理、强制切人处理（支持 decisionProvider.chooseActive，未提供时按首个候选确定）
+当前支持初始动作：
+switchActive
+declareEnd
+其他动作（useSkill/playCard/elementalTuning）会抛出 “not supported yet”
+为 SkillExecutor 增加同步事件执行入口
+文件: skill_executor.ts
+
+新增 handleEventSync(...events)（只处理非 request 事件）
+新增 SkillExecutor.executeEventSync(mutator, event) 静态入口
+遇到 request* 事件直接抛错，避免隐式 IO
+扩展 decoupled 类型与导出
+
+新增 RuleEngineDecisionProvider / RuleEngineExecuteResult：
+types.ts
+PureLogicEngine.execute 增加可选 decisionProvider 参数：
+types.ts
+在 decoupled 模块导出 RuleEngine：
+index.ts
+PureGameEngine 已接到 RuleEngine
+文件: pure_engine.ts
+
+execute 现在委托 RuleEngine.execute(...)
+保留 history 聚合逻辑
+getPossibleActions 仍是 TODO（后续适配 old availableActions）
+验证
+
+执行通过：D:\bun\bin\bun.exe run --filter @gi-tcg/core check
+当前边界（重要）
+
+这版是你要求的“先搬最简单切人/结束回合”的 RuleEngine 骨架。
+还没把 useSkill/playCard/elementalTuning 初始动作迁入 RuleEngine。
+request 型事件（如 reroll/select/trigger skill 请求）在同步路径会抛错，符合“纯内存内核不做 IO”的约束。

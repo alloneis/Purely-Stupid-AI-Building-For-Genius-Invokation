@@ -1,0 +1,80 @@
+
+先解耦状态变更表示
+把 StateMutator 的副作用改成“纯 Patch[] 输出 + apply 层”，先不动技能内容。
+再解耦技能/卡牌执行上下文
+把 skillDef.action(state, skillInfo, arg) 改成只吃纯上下文，不直接拿 mutator/logger。
+抽离规则内核
+做 RuleEngine.execute(state, action) -> {nextState, events}，Game 只做 IO/RPC 调度。
+最后替换入口
+Game.availableActions()/start() 逐步改为调用 RuleEngine，旧逻辑做适配器，灰度迁移。
+判断“已解耦完成”的标准:
+
+角色技能/卡牌效果函数不 import mutator/game/io
+核心规则在 Node 里可纯函数回放（同 seed 同结果）
+UI/网络/AI 只是适配器，不参与规则计算
+i already changed /d:/Users/Administrator/Desktop/b/genius-invokation/packages/core/src/decoupled/rule_engine.ts
+
+/d:/Users/Administrator/Desktop/b/genius-invokation/packages/core/src/preview.ts
+
+把 game.ts 入口（actionPhase/start/availableActions）切到 RuleEngine 适配层
+你需要解决以下几个关键技术债：
+
+1. 剔除所有 async/await
+目前的 availableActions 是 async 的，因为它在结尾调用了 ActionPreviewer，而 ActionPreviewer 可能是异步的。
+
+对于 AI 来说： 寻找合法动作必须是绝对同步的。如果你的 ActionPreviewer 依赖了异步 IO，你需要为它写一个 ActionPreviewer.modifyAndPreviewSync() 版本（复用你之前写的 handleEventSync）。
+
+2. 解除对 this (Game 实例) 的依赖
+把方法签名从 async availableActions() 改为：
+
+TypeScript
+static getPossibleActions(state: GameState): GameAction[]
+把里面所有的 this.state 替换为传入的 state，把 this.config 替换为 state.config。
+
+3. 将 ActionInfo 映射为统一的 GameAction (Payload)
+game.ts 里的 availableActions 返回的是带有复杂运行时引用的 ActionInfoWithModification。AI 无法理解这些复杂的对象，AI 需要的是可序列化的指令（就是你在 RuleEngine 里解析的那个 actionPayload.$case）。
+你需要在返回前，把内部的 ActionInfo 转换成标准的 Action 协议格式。
+
+验证里程碑：终极试金石（Headless Random Bot 测试）
+当你把 getPossibleActions 填补完成（并且全是纯同步逻辑）后，你将迎来这个项目最激动人心的时刻。
+
+你可以修改一个 test_state_mutator.ts 文件，类似下面测试代码：
+
+TypeScript
+import { PureGameEngine } from './pure_engine';
+// 导入你的初始卡组和数据...
+
+async function runRandomAI() {
+  const engine = new PureGameEngine(gameData, defaultConfig);
+  let state = engine.createInitialState(deck1, deck2);
+  
+  console.log("=== 幻境模拟开始 ===");
+  const startTime = Date.now();
+  let stepCount = 0;
+
+  // 只要游戏没结束，就一直疯狂自己打自己
+  while (!state.isFinished && stepCount < 10000) {
+    const actions = engine.getPossibleActions(state);
+    
+    if (actions.length === 0) {
+      console.log("无合法动作，卡死了？");
+      break;
+    }
+
+    // 随机挑选一个动作（哪怕是最蠢的动作）
+    const randomAction = actions[Math.floor(Math.random() * actions.length)];
+    
+    // 瞬间执行，没有动画，没有等待
+    state = await engine.execute(state, randomAction);
+    stepCount++;
+  }
+
+  const costTime = Date.now() - startTime;
+  console.log(`=== 模拟结束 ===`);
+  console.log(`总共执行了 ${stepCount} 步动作`);
+  console.log(`耗时: ${costTime} 毫秒`);
+  console.log(`性能: ${Math.floor(stepCount / (costTime / 1000))} 步/秒`);
+  console.log(`赢家: ${state.winner}`);
+}
+
+runRandomAI();

@@ -1,0 +1,14 @@
+
+
+饰金之梦 触发元素反应没有触发抽牌
+第二回合开始开局没有重投骰子
+ai reroll 0 dice this algrithom this easy
+没有撕牌(将其中一个骰子转换成当前元素角色头）的操作
+
+
+
+回合结束死亡不结算游戏胜利bug
+感觉没有预知状态，没有演算手牌模型的收益条件，比如场地在装备原本数量总和大于对方时生成骰子，没有状态记录双方装备总和，没有通过自己手牌演算，选择打出装备吃收益
+没有记录角色状态，比如当到地3回合时，伤害加2，没有演算先出场该角色吃伤害，将防御圣遗物装在该角色上，不装减少费用的圣遗物
+他对游戏手牌的条件的所有效果触发，他对游戏手牌的条件的所有效果触发，the model must have limit constraint , maybe 我没有完全解耦手牌逻辑，不然ai 为什么做了mcts 还能算出收益，一定是- 收益
+he should not without process further(mcts process) to play that card. if he caculated the 手牌模型的收益条件, 它肯定找不到，能有收益的概率
