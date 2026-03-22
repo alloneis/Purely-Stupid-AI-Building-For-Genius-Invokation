@@ -1,0 +1,110 @@
+{
+  "phases": [
+    {
+      "name": "A_quickstart",
+      "model": {
+        "d_context": 256,
+        "d_trunk": 256,
+        "n_heads": 4
+      },
+      "data": {
+        "games": 10000,
+        "mode": "fast",
+        "batch": 16,
+        "temperature": 1.0
+      },
+      "training": {
+        "epochs": 20,
+        "lr": 1e-3,
+        "batch_size": 256,
+        "eval_every": 5,
+        "early_stop_patience": 3
+      },
+      "arena": {
+        "games_per_side": 30,
+        "promotion_threshold": 0.54
+      },
+      "transition": {
+        "max_generations": 5,
+        "loss_plateau_window": 4,
+        "loss_plateau_min_drop": 0.02,
+        "arena_stagnation_count": 2,
+        "arena_degrade_threshold": 0.48,
+        "grace_generations": 0
+      }
+    },
+    {
+      "name": "B_saturate",
+      "model": {
+        "d_context": 256,
+        "d_trunk": 256,
+        "n_heads": 4
+      },
+      "data": {
+        "games": 50000,
+        "mode": "fast",
+        "batch": 16,
+        "temperature": 0.8
+      },
+      "training": {
+        "epochs": 30,
+        "lr": 5e-4,
+        "batch_size": 256,
+        "eval_every": 5,
+        "early_stop_patience": 3
+      },
+      "arena": {
+        "games_per_side": 50,
+        "promotion_threshold": 0.53
+      },
+      "transition": {
+        "max_generations": 3,
+        "loss_plateau_window": 4,
+        "loss_plateau_min_drop": 0.01,
+        "arena_stagnation_count": 2,
+        "arena_degrade_threshold": 0.48,
+        "grace_generations": 0
+      }
+    },
+    {
+      "name": "C_scale_up",
+      "model": {
+        "d_context": 512,
+        "d_trunk": 512,
+        "n_heads": 8
+      },
+      "data": {
+        "games": 100000,
+        "mode": "quality",
+        "batch": 8,
+        "temperature": 0.6
+      },
+      "training": {
+        "epochs": 40,
+        "lr": 3e-4,
+        "batch_size": 256,
+        "eval_every": 5,
+        "early_stop_patience": 3
+      },
+      "arena": {
+        "games_per_side": 80,
+        "promotion_threshold": 0.52
+      },
+      "transition": {
+        "max_generations": 5,
+        "loss_plateau_window": 5,
+        "loss_plateau_min_drop": 0.005,
+        "arena_stagnation_count": 3,
+        "arena_degrade_threshold": 0.48,
+        "grace_generations": 2
+      }
+    }
+  ],
+  "global": {
+    "bun_path": "bun",
+    "device": "cuda",
+    "work_dir": "./training_runs",
+    "data_gen": "neural",
+    "buffer_generations": 3
+  }
+}

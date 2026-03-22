@@ -7,6 +7,8 @@ import {
   DynamicHeuristicEvaluator,
   type DynamicHeuristicEvaluatorOptions,
 } from "./dynamic_heuristic_evaluator";
+import type { NeuralEvaluator } from "./neural/neural_evaluator";
+import { ActionIndexer } from "./neural/action_encoder";
 import { RuleEngine } from "./rule_engine";
 import type { GameAction, PureGameState } from "./types";
 
@@ -20,6 +22,8 @@ export interface ISMCTSAgentOptions {
   evaluator?: DynamicHeuristicEvaluator;
   evaluatorOptions?: DynamicHeuristicEvaluatorOptions;
   prunerOptions?: ActionPrunerOptions;
+  /** When provided, uses neural net for root policy priors (PUCT) and leaf evaluation. */
+  neuralEvaluator?: NeuralEvaluator;
 }
 
 export interface ISMCTSActionStat {
@@ -106,6 +110,7 @@ export class ISMCTSAgent {
   private readonly rng: () => number;
   private readonly evaluator: DynamicHeuristicEvaluator;
   private readonly pruner: ActionPruner;
+  private readonly neural: NeuralEvaluator | null;
 
   constructor(options: ISMCTSAgentOptions = {}) {
     this.iterations = options.iterations ?? DEFAULT_OPTIONS.iterations;
@@ -121,6 +126,7 @@ export class ISMCTSAgent {
       evaluator: this.evaluator,
       ...options.prunerOptions,
     });
+    this.neural = options.neuralEvaluator ?? null;
   }
 
   getBestAction(
@@ -130,6 +136,58 @@ export class ISMCTSAgent {
   ): GameAction {
     return this.getBestActionWithDebug(state, legalActions, perspective).action;
   }
+
+  /**
+   * Neural-enhanced async version. Pre-computes policy + value via ONNX,
+   * then runs MCTS using neural priors for PUCT and neural value for leaf eval.
+   * Falls back to heuristic-only getBestActionWithDebug if no neural evaluator.
+   */
+  async getBestActionNeuralAsync(
+    state: PureGameState,
+    legalActions?: readonly GameAction[],
+    perspective: 0 | 1 = state.gameState.currentTurn,
+  ): Promise<{ action: GameAction; debug: ISMCTSDecisionDebug }> {
+    if (!this.neural) {
+      return this.getBestActionWithDebug(state, legalActions, perspective);
+    }
+
+    const baseActions =
+      legalActions?.filter((a) => a.validity === ActionValidity.VALID) ??
+      RuleEngine.getPossibleActions(state.gameState, { fastMode: true }).filter(
+        (a) => a.validity === ActionValidity.VALID,
+      );
+
+    if (baseActions.length === 0) {
+      throw new Error("ISMCTSAgent: no legal action");
+    }
+    if (baseActions.length === 1) {
+      const stat: ISMCTSActionStat = { action: baseActions[0], visits: 0, meanValue: 0 };
+      return {
+        action: baseActions[0],
+        debug: {
+          selected: stat, candidates: [stat], top3: [stat],
+          determinizationCount: 0, simulationsPerDeterminization: 0,
+          processLogs: ["single action, skipping MCTS"],
+        },
+      };
+    }
+
+    const { value: neuralValue, policy: neuralPolicy } =
+      await this.neural.evaluateWithPolicy(state, baseActions, perspective);
+
+    this.cachedNeuralPolicy = neuralPolicy;
+    this.cachedNeuralValue = neuralValue;
+
+    try {
+      return this.getBestActionWithDebug(state, baseActions, perspective);
+    } finally {
+      this.cachedNeuralPolicy = null;
+      this.cachedNeuralValue = null;
+    }
+  }
+
+  private cachedNeuralPolicy: Float32Array | null = null;
+  private cachedNeuralValue: number | null = null;
 
   getBestActionWithDebug(
     state: PureGameState,
@@ -444,10 +502,25 @@ export class ISMCTSAgent {
     if (scoredChildren.length === 0) {
       return null;
     }
-    const priorProbabilities = this.toSoftmaxProbabilities(
-      scoredChildren.map((entry) => entry.priorScore),
-      1.25,
-    );
+
+    let priorProbabilities: number[];
+    if (this.cachedNeuralPolicy && node.parent === null) {
+      // At the root node during neural-enhanced search, use the neural policy
+      // directly as PUCT priors instead of heuristic softmax.
+      priorProbabilities = scoredChildren.map((entry) => {
+        const idx = this.actionKeyToSlotIndex(entry.action, state.gameState, currentPlayer);
+        return idx >= 0 ? (this.cachedNeuralPolicy![idx] || 1e-6) : 1e-6;
+      });
+      const probSum = priorProbabilities.reduce((s, v) => s + v, 0);
+      if (probSum > 0) {
+        priorProbabilities = priorProbabilities.map((p) => p / probSum);
+      }
+    } else {
+      priorProbabilities = this.toSoftmaxProbabilities(
+        scoredChildren.map((entry) => entry.priorScore),
+        1.25,
+      );
+    }
 
     for (let i = 0; i < scoredChildren.length; i++) {
       const { child, action } = scoredChildren[i];
@@ -461,7 +534,6 @@ export class ISMCTSAgent {
       const blended = this.minimaxBlend * minimax + (1 - this.minimaxBlend) * mean;
       const exploitation = currentPlayer === rootPlayer ? blended : -blended;
       const prior = priorProbabilities[i] ?? 0;
-      // PUCT-style exploration guided by heuristic prior attention.
       const exploration =
         this.exploration * prior * (sqrtParentVisits / Math.max(1, child.visits));
       const score = exploitation + exploration;
@@ -540,7 +612,15 @@ export class ISMCTSAgent {
       currentDepth += 1;
     }
 
-    return this.evaluator.evaluate(state, rootPlayer);
+    const heuristicValue = this.evaluator.evaluate(state, rootPlayer);
+    if (this.cachedNeuralValue !== null) {
+      // Blend: 70% heuristic (which sees the actual rollout leaf state)
+      // + 30% neural root value (provides learned "intuition").
+      // The neural value is in [-1, 1], scale it to match heuristic magnitude.
+      const scaledNeural = this.cachedNeuralValue * Math.abs(heuristicValue || 1);
+      return 0.7 * heuristicValue + 0.3 * scaledNeural;
+    }
+    return heuristicValue;
   }
 
   private createNode(
@@ -766,5 +846,15 @@ export class ISMCTSAgent {
       dice: action.autoSelectedDice,
       fast: action.isFast,
     });
+  }
+
+  private readonly _actionIndexer = new ActionIndexer();
+
+  private actionKeyToSlotIndex(
+    action: GameAction,
+    gameState: GameState,
+    perspective: 0 | 1,
+  ): number {
+    return this._actionIndexer.actionToIndex(action, gameState, perspective);
   }
 }

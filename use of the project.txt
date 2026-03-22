@@ -1,0 +1,164 @@
+Flag	Default	Purpose
+train.py:
+
+--eval_every	5	Run arena eval every N epochs (0 disables)
+--eval_games_per_side	30	Games per side (total = 2x, with side-swapping)
+--eval_mode	fast	fast (neural-only) or quality (neural+MCTS)
+--eval_temperature	0.5	Action sampling temperature
+--promotion_threshold	0.54	Win rate needed to promote to new baseline
+--early_stop_patience	3	Consecutive failed evals before stopping (0 disables)
+--project_root	auto	Path to project root (auto-detected from train.py location)
+--bun_path	bun	Path to bun executable
+
+bun run packages/core/scripts/run_arena.ts \
+  --model-a ./models/new.onnx \
+  --model-b ./models/old.onnx \
+  --games-per-side 100 --mode fast
+
+# Fast mode: bulk generation
+bun run packages/core/scripts/run_neural_selfplay.ts \
+  --model ./models/tcg_evaluator.onnx \
+  --games 10000 --batch 8 --mode fast --output ./episodes
+
+# Quality mode: high-quality data
+bun run packages/core/scripts/run_neural_selfplay.ts \
+  --model ./models/tcg_evaluator.onnx \
+  --games 1000 --batch 4 --mode quality --output ./episodes
+
+python training/train.py --data_dir ./episodes --epochs 30
+python training/export_onnx.py --checkpoint ./checkpoints/latest.pt --output ./models/tcg_evaluator.onnx --verify
+
+bun run packages/core/scripts/run_bootstrap.ts --games 10000 --parallel 4 --output ./episodes
+python training/convert_to_pt.py --input ./episodes --output ./episodes
+
+
+python orchestrator.py --strategy strategy_smoke.json
+
+Loading ONNX model: D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\current_model.onnx
+  Inputs:  global_features, self_characters, oppo_characters, hand_cards, hand_mask, summons, summons_mask, action_mask
+  Outputs: value, log_policy, next_hp, card_play, oppo_belief, kill_pred, reaction_pred, dice_efficiency
+
+Self-play: 4 games, batch=2, mode=fast, temp=1, output → D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\gen_smoke_test_000
+
+  [4/4] episodes=8 steps=371 elapsed=3.1s (1.27 games/s, ~584ms/game) W: P0=0 P1=1 D=3
+  flushed 8 episodes → D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\gen_smoke_test_000\neural_fast_0.jsonl
+
+Done: 4 games, 8 episodes, 371 total steps in 3.1s (1.27 games/s)
+Reading neural_fast_0.jsonl...
+Reading progress.jsonl...
+  Saved 8 episodes (374 steps) → bootstrap_0000.pt
+
+Done: 8 episodes, 374 steps → 1 .pt files (2 lines skipped)
+Device: cpu
+Data:   D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\active
+Model parameters: 1,074,340  (d_context=256, d_trunk=256, n_heads=4)
+Loading episodes & computing TD(λ) targets + PER priorities ...
+  374 steps loaded in 0.2s
+Metrics log: D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\checkpoints_smoke_test\metrics.jsonl
+[EVAL] Baseline initialized from D:\Users\Administrator\Desktop\b\genius-invokation\models\tcg_evaluator.onnx
+[EVAL] Arena evaluation disabled (no baseline or eval_every=0)
+Epoch 1/3  (0.4s)  total=1.1411  V=0.0680  P=1.9048  HP=0.1479  C=0.3881  B=0.1967  K=0.5444  R=0.5073  D=0.1767  Ent=560.3970  lr=7.53e-04  beta=0.400
+Epoch 2/3  (0.3s)  total=0.7436  V=0.0270  P=1.9691  HP=0.0796  C=0.1192  B=0.0605  K=0.1690  R=0.1693  D=0.0706  Ent=551.5717  lr=2.58e-04  beta=0.700
+Epoch 3/3  (0.3s)  total=0.4867  V=0.0219  P=1.9857  HP=0.0905  C=0.0321  B=0.0122  K=0.0458  R=0.0618  D=0.0598  Ent=552.3269  lr=1.00e-05  beta=1.000
+Training complete. Promotions: 0
+Loading checkpoint: D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\checkpoints_smoke_test\latest.pt
+  Using saved ModelConfig: {'d_context': 256, 'd_trunk': 256, 'n_heads': 4}
+  Loaded weights from epoch 2
+Parameters: 1,074,340
+Exported to D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\smoke_test_gen0.onnx
+Loading ONNX model: D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\current_model.onnx
+  Inputs:  global_features, self_characters, oppo_characters, hand_cards, hand_mask, summons, summons_mask, action_mask
+  Outputs: value, log_policy, next_hp, card_play, oppo_belief, kill_pred, reaction_pred, dice_efficiency
+
+Self-play: 4 games, batch=2, mode=fast, temp=1, output → D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\gen_smoke_test_001
+
+  [4/4] episodes=8 steps=532 elapsed=4.6s (0.86 games/s, ~1766ms/game) W: P0=0 P1=1 D=3
+  flushed 8 episodes → D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\gen_smoke_test_001\neural_fast_0.jsonl
+
+Done: 4 games, 8 episodes, 532 total steps in 4.7s (0.86 games/s)
+Reading neural_fast_0.jsonl...
+Reading progress.jsonl...
+  Saved 8 episodes (533 steps) → bootstrap_0000.pt
+
+Done: 8 episodes, 533 steps → 1 .pt files (2 lines skipped)
+Device: cpu
+Data:   D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\active
+Model parameters: 1,074,340  (d_context=256, d_trunk=256, n_heads=4)
+Resumed from epoch 3
+Loading episodes & computing TD(λ) targets + PER priorities ...
+  907 steps loaded in 0.3s
+Metrics log: D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\checkpoints_smoke_test\metrics.jsonl
+[EVAL] Arena evaluation disabled (no baseline or eval_every=0)
+Training complete. Promotions: 0
+Loading checkpoint: D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\checkpoints_smoke_test\latest.pt
+  Using saved ModelConfig: {'d_context': 256, 'd_trunk': 256, 'n_heads': 4}
+  Loaded weights from epoch 2
+Parameters: 1,074,340
+Exported to D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\smoke_test_gen1.onnx
+Bootstrapped current_model from D:\Users\Administrator\Desktop\b\genius-invokation\models\tcg_evaluator.onnx
+======================================================================
+  Auto-Scaling Training Orchestrator
+  Phases: ['smoke_test']
+  Work dir: D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run
+  Project root: D:\Users\Administrator\Desktop\b\genius-invokation
+  Buffer: keep last 2 generations
+======================================================================
+
+
+######################################################################
+  PHASE: smoke_test
+  Model: d_context=256, d_trunk=256, n_heads=4
+  Data: 4 games, mode=fast
+######################################################################
+
+
+────────────────────────────────────────────────────────────
+  Generation: smoke_test_gen0 (1/2)
+────────────────────────────────────────────────────────────
+
+  [DATA-GEN smoke_test_gen0] Running: bun run D:\Users\Administrator\Desktop\b\genius-invokation\packages\core\scripts\run_neural_selfplay.ts --model D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\current_model.onnx --games...
+  [DATA-GEN] Done: 2 .jsonl files in 4s
+
+  [CONVERT] Running: D:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe D:\Users\Administrator\Desktop\b\genius-invokation\training\convert_to_pt.py --input D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\gen_smoke_test_000 --output D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\gen_smoke_test_000...
+  [CONVERT] Done: 1 .pt files
+  [BUFFER] 1 generations, 1 .pt files in active/
+
+  [TRAIN] Running: D:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe D:\Users\Administrator\Desktop\b\genius-invokation\training\train.py --data_dir D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\active --checkpoint_dir D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\checkpoints_smoke_test...
+  [TRAIN] Done in 4s
+
+  [EXPORT] Running: D:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe D:\Users\Administrator\Desktop\b\genius-invokation\training\export_onnx.py --checkpoint D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\checkpoints_smoke_test\latest.pt --output D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\smoke_test_gen0.onnx...
+  [COLD-START] First model promoted to baseline (no arena needed)
+
+────────────────────────────────────────────────────────────
+  Generation: smoke_test_gen1 (2/2)
+────────────────────────────────────────────────────────────
+
+  [DATA-GEN smoke_test_gen1] Running: bun run D:\Users\Administrator\Desktop\b\genius-invokation\packages\core\scripts\run_neural_selfplay.ts --model D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\current_model.onnx --games...
+  [DATA-GEN] Done: 2 .jsonl files in 5s
+
+  [CONVERT] Running: D:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe D:\Users\Administrator\Desktop\b\genius-invokation\training\convert_to_pt.py --input D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\gen_smoke_test_001 --output D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\gen_smoke_test_001...
+  [CONVERT] Done: 1 .pt files
+  [BUFFER] 2 generations, 2 .pt files in active/
+
+  [TRAIN] Running: D:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe D:\Users\Administrator\Desktop\b\genius-invokation\training\train.py --data_dir D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\episodes\active --checkpoint_dir D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\checkpoints_smoke_test...
+  [TRAIN] Done in 3s
+
+  [EXPORT] Running: D:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe D:\Users\Administrator\Desktop\b\genius-invokation\training\export_onnx.py --checkpoint D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\checkpoints_smoke_test\latest.pt --output D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\smoke_test_gen1.onnx...
+
+  [DIAGNOSIS] Verdict: cold_start
+    Loss: dropping | Arena: no_data
+    Value=0.0219 Policy=1.9857 Ent=552.3
+    Arena WR: latest=0.0% best=0.0%
+    Promotions this gen: 0
+    Detail: No arena results available yet
+  [ACTION] Cold start (no arena data) — continuing
+
+  Phase smoke_test complete. Total promotions: 1
+
+======================================================================
+  Pipeline complete!
+  Total promotions: 1
+  Final model: D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\current_model.onnx
+  Baseline: D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\baseline.onnx
+  Logs: D:\Users\Administrator\Desktop\b\genius-invokation\training\smoke_run\orchestrator.jsonl
+======================================================================

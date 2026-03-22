@@ -38,6 +38,7 @@
     "@gi-tcg/config": "workspace:*",
     "@gi-tcg/data": "workspace:*",
     "@ohm-js/cli": "^2.0.0",
+    "onnxruntime-node": "^1.24.3",
     "prettier": "3.1.1"
   }
 }

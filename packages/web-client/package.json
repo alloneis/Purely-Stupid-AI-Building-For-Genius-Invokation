@@ -15,8 +15,8 @@
     "@gi-tcg/core": "workspace:*",
     "@gi-tcg/data": "workspace:*",
     "@gi-tcg/deck-builder": "workspace:*",
-    "@gi-tcg/web-ui-core": "workspace:*",
     "@gi-tcg/typings": "workspace:*",
+    "@gi-tcg/web-ui-core": "workspace:*",
     "@server-sent-stream/web": "^1.0.3",
     "@solid-primitives/storage": "^4.2.1",
     "@solidjs/router": "^0.13.5",
@@ -25,6 +25,7 @@
     "axios": "^1.7.2",
     "core-js": "3.38.1",
     "dayjs": "^1.11.13",
+    "onnxruntime-web": "^1.24.3",
     "solid-js": "catalog:"
   },
   "devDependencies": {

@@ -179,20 +179,22 @@ export class ActionPruner {
     let gain = 0;
     switch (payload.$case) {
       case "useSkill": {
-        gain = 3.2;
+        // BOOTSTRAP: heavily reward attacking to prevent cowardice loops
+        gain = 6.0;
         const targetId = payload.value.mainDamageTargetId;
         if (typeof targetId === "number") {
           const hp = this.findCharacterHp(state, targetId);
           if (hp > 0 && hp <= 3) {
-            gain += 1.8;
+            gain += 3.0;
+          } else if (hp > 0 && hp <= 6) {
+            gain += 1.5;
           }
         }
         if (activeSelf && enemyAura !== Aura.None) {
           const activeElement = elementOfCharacter(activeSelf.definition);
           const reaction = RuleEngine.getTriggeredReaction(activeElement, enemyAura);
           if (reaction !== null) {
-            // Reaction-ready skills get extra rollout attention.
-            gain += 1.1;
+            gain += 2.0;
           }
         }
         break;
@@ -202,7 +204,8 @@ export class ActionPruner {
         break;
       }
       case "switchActive": {
-        gain = 0.4;
+        // BOOTSTRAP: heavily penalize switching to prevent infinite loops
+        gain = -3.0;
         const nextActive = actorPlayer.characters.find(
           (c) => c.id === payload.value.characterId,
         );
@@ -213,19 +216,18 @@ export class ActionPruner {
             ? Math.max(1, nextActive.variables.maxEnergy)
             : 3;
         if (nextEnergy >= nextMaxEnergy) {
-          gain += 1.4;
+          gain += 2.5;
         }
         if (enemyAura !== Aura.None) {
           const nextElement = nextActive ? elementOfCharacter(nextActive.definition) : DiceType.Void;
           if (RuleEngine.canTriggerReaction(nextElement, enemyAura)) {
-            // Encourage switch lines that prepare immediate reaction pressure.
-            gain += 1.8;
+            gain += 2.0;
           }
         }
         const fromHp =
           typeof activeSelf?.variables.health === "number" ? activeSelf.variables.health : 10;
         if (fromHp <= 2) {
-          gain += 1.2;
+          gain += 2.0;
         }
         break;
       }
