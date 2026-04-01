@@ -9,37 +9,40 @@ Architecture:
   ┌─────────────────┐ ┌────────────────┐ ┌────────────────┐
   │ global_features  │ │ self_characters │ │ oppo_characters │
   │    [B, 27]       │ │   [B, 3, 32]   │ │   [B, 3, 32]   │
-  └────────┬─────────┘ └───────┬────────┘ └───────┬────────┘
+  └────────┬─────────┘ └──┬─────────────┘ └──┬─────────────┘
+           │           entity pool          entity pool
+           │         [B,3,ent_summary]    [B,3,ent_summary]
+           │              concat              concat
+           │         [B,3,32+pool_d]     [B,3,32+pool_d]
            │              flatten              flatten
            └────────────────┬──────────────────┘
                             ▼
                      Context MLP → [B, 256]
                             │
-           ┌────────────────┼────────────────┐
-           │                │                │
-           ▼                │                ▼
-       hand_cards        context          summons
-       [B,10,16]         [B,256]          [B,4,16]
-         │ id→embed          │          id→embed │
-         │ [B,10,23]         │          [B,4,23] │
-         │ ISAB+PMA        │            PMA │
-         ▼                 │                ▼
-       [B,256]             │            [B,128]
-           └────────────────┴────────────────┘
+      ┌──────────┬──────────┼──────────┬──────────┐
+      │          │          │          │          │
+      ▼          ▼          │          ▼          ▼
+  hand_cards  summons    context   supports  combat_sts
+  [B,10,16]   [B,4,16]  [B,256]   [B,4,16]  [B,10,16]
+    │ embed     │ embed      │     │ embed    │ embed
+    │ ISAB+PMA  │ PMA        │     │ PMA      │ PMA
+    ▼           ▼            │     ▼          ▼
+  [B,256]    [B,128]         │   [B,128]   [B,128]
+      └──────────┴───────────┴─────┴──────────┘
                             ▼
                      Trunk MLP → [B, 256]
                             │
                     ┌───────┼───────┐
                     ▼       ▼       ▼
                 Value   Policy   Auxiliary
-                [B,1]   [B,64]   ├─ next_hp      [B,1]
+                [B,1]   [B,128]  ├─ next_hp      [B,1]
                 tanh   log_sfmx  ├─ card_play    [B,10]  sigmoid
                                  ├─ oppo_belief  [B,16]  sigmoid
                                  ├─ kill_pred    [B,6]   sigmoid (3 self + 3 oppo)
                                  ├─ reaction     [B,1]   sigmoid
                                  └─ dice_eff     [B,1]
 
-Total parameters: ~1.05 M  (well under the 3 M budget)
+Total parameters: ~1.4 M  (well under the 3 M budget)
 """
 
 from __future__ import annotations
@@ -76,7 +79,10 @@ ENTITY_STRUCT_DIM = ENTITY_FEATURE_DIM - 1
 MAX_CHARACTERS = 3
 MAX_HAND_CARDS = 10
 MAX_SUMMONS = 4
-MAX_ACTION_SLOTS = 64
+MAX_SUPPORTS = 4
+MAX_COMBAT_STATUSES = 10
+MAX_CHARACTER_ENTITIES = 8
+MAX_ACTION_SLOTS = 128
 
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
@@ -94,6 +100,9 @@ class ModelConfig:
     max_chars: int = MAX_CHARACTERS
     max_hand: int = MAX_HAND_CARDS
     max_summons: int = MAX_SUMMONS
+    max_supports: int = MAX_SUPPORTS
+    max_combat_statuses: int = MAX_COMBAT_STATUSES
+    max_char_entities: int = MAX_CHARACTER_ENTITIES
     action_slots: int = MAX_ACTION_SLOTS
     # --- ID embedding (replaces raw definitionId scalar) ---
     num_id_buckets: int = 512
@@ -105,6 +114,9 @@ class ModelConfig:
     n_heads: int = 4
     hand_seeds: int = 2
     summon_seeds: int = 1
+    support_seeds: int = 1
+    combat_status_seeds: int = 1
+    char_entity_pool_dim: int = 32
     hand_inducing: int = 4
     ff_mult: int = 2
     use_isab_hand: bool = True
@@ -273,8 +285,15 @@ class TCGNeuralEvaluator(nn.Module):
         card_in = CARD_STRUCT_DIM + c.id_embed_dim     # 15 + 8 = 23
         entity_in = ENTITY_STRUCT_DIM + c.id_embed_dim  # 15 + 8 = 23
 
-        # ── 1. Fixed-feature encoder ──────────────────────────────────
-        fixed_dim = c.global_dim + c.max_chars * c.char_dim * 2
+        # ── 1. Character entity pooling (masked mean → summary per char) ─
+        self.char_entity_proj = nn.Sequential(
+            nn.Linear(entity_in, c.char_entity_pool_dim),
+            nn.GELU(),
+        )
+        augmented_char_dim = c.char_dim + c.char_entity_pool_dim
+
+        # ── 2. Fixed-feature encoder ──────────────────────────────────
+        fixed_dim = c.global_dim + c.max_chars * augmented_char_dim * 2
         self.context_mlp = nn.Sequential(
             nn.Linear(fixed_dim, c.d_context),
             nn.GELU(),
@@ -304,8 +323,33 @@ class TCGNeuralEvaluator(nn.Module):
             ff_mult=c.ff_mult,
         )
 
-        # ── 3. Trunk ──────────────────────────────────────────────────
-        trunk_in = c.d_context + self.hand_enc.output_dim + self.summon_enc.output_dim
+        self.support_enc = SetEncoder(
+            in_dim=entity_in,
+            d=c.d_set,
+            n_heads=c.n_heads,
+            n_seeds=c.support_seeds,
+            n_inducing=2,
+            use_isab=False,
+            ff_mult=c.ff_mult,
+        )
+        self.combat_status_enc = SetEncoder(
+            in_dim=entity_in,
+            d=c.d_set,
+            n_heads=c.n_heads,
+            n_seeds=c.combat_status_seeds,
+            n_inducing=2,
+            use_isab=False,
+            ff_mult=c.ff_mult,
+        )
+
+        # ── 4. Trunk ──────────────────────────────────────────────────
+        trunk_in = (
+            c.d_context
+            + self.hand_enc.output_dim
+            + self.summon_enc.output_dim
+            + self.support_enc.output_dim * 2    # self + oppo
+            + self.combat_status_enc.output_dim * 2  # self + oppo
+        )
         self.trunk = nn.Sequential(
             nn.Linear(trunk_in, c.d_trunk),
             nn.GELU(),
@@ -315,7 +359,7 @@ class TCGNeuralEvaluator(nn.Module):
             nn.LayerNorm(c.d_trunk),
         )
 
-        # ── 4. Value head → scalar ∈ [-1, 1] ─────────────────────────
+        # ── 5. Value head → scalar ∈ [-1, 1] ─────────────────────────
         self.value_head = nn.Sequential(
             nn.Linear(c.d_trunk, c.d_trunk // 2),
             nn.GELU(),
@@ -323,49 +367,49 @@ class TCGNeuralEvaluator(nn.Module):
             nn.Tanh(),
         )
 
-        # ── 5. Policy head → logits of size action_slots ─────────────
+        # ── 6. Policy head → logits of size action_slots ─────────────
         self.policy_head = nn.Sequential(
             nn.Linear(c.d_trunk, c.d_trunk // 2),
             nn.GELU(),
             nn.Linear(c.d_trunk // 2, c.action_slots),
         )
 
-        # ── 6. Auxiliary: active-character HP in 5 turns ───────────────
+        # ── 7. Auxiliary: active-character HP in 5 turns ───────────────
         self.next_hp_head = nn.Sequential(
             nn.Linear(c.d_trunk, 64),
             nn.GELU(),
             nn.Linear(64, 1),
         )
 
-        # ── 7. Auxiliary: per-hand-card playability next turn ──────────
+        # ── 8. Auxiliary: per-hand-card playability next turn ──────────
         self.card_playability_head = nn.Sequential(
             nn.Linear(c.d_trunk, 64),
             nn.GELU(),
             nn.Linear(64, c.max_hand),
         )
 
-        # ── 8. Auxiliary: opponent hidden-hand belief state ───────────
+        # ── 9. Auxiliary: opponent hidden-hand belief state ───────────
         self.oppo_belief_head = nn.Sequential(
             nn.Linear(c.d_trunk, 64),
             nn.GELU(),
             nn.Linear(64, c.card_dim),
         )
 
-        # ── 9. Auxiliary: kill prediction (char death within 3 turns) ─
+        # ── 10. Auxiliary: kill prediction (char death within 3 turns) ─
         self.kill_pred_head = nn.Sequential(
             nn.Linear(c.d_trunk, 64),
             nn.GELU(),
             nn.Linear(64, c.max_chars * 2),  # 3 self + 3 oppo
         )
 
-        # ── 10. Auxiliary: element reaction on next attack ────────────
+        # ── 11. Auxiliary: element reaction on next attack ────────────
         self.reaction_pred_head = nn.Sequential(
             nn.Linear(c.d_trunk, 64),
             nn.GELU(),
             nn.Linear(64, 1),
         )
 
-        # ── 11. Auxiliary: dice efficiency (effective actions count) ──
+        # ── 12. Auxiliary: dice efficiency (effective actions count) ──
         self.dice_efficiency_head = nn.Sequential(
             nn.Linear(c.d_trunk, 64),
             nn.GELU(),
@@ -410,6 +454,27 @@ class TCGNeuralEvaluator(nn.Module):
             self.dice_efficiency_head[-1].weight.normal_(std=0.01)
             self.dice_efficiency_head[-1].bias.zero_()
 
+    def _pool_char_entities(
+        self,
+        entities: torch.Tensor,    # [B, max_chars * max_ent, feat_dim]
+        mask: torch.Tensor,        # [B, max_chars * max_ent]
+    ) -> torch.Tensor:
+        """Masked mean pool of character entities → [B, max_chars, pool_dim]."""
+        c = self.cfg
+        B = entities.size(0)
+        ent = entities.view(B, c.max_chars, c.max_char_entities, -1)
+        m = mask.view(B, c.max_chars, c.max_char_entities)
+        embedded = self._embed_ids(
+            ent.reshape(B * c.max_chars, c.max_char_entities, -1),
+            self.entity_id_embed,
+        )
+        projected = self.char_entity_proj(embedded)  # [B*3, E, pool_d]
+        projected = projected.view(B, c.max_chars, c.max_char_entities, -1)
+        m_expanded = m.unsqueeze(-1)  # [B, 3, E, 1]
+        summed = (projected * m_expanded).sum(dim=2)
+        count = m_expanded.sum(dim=2).clamp(min=1.0)
+        return summed / count  # [B, 3, pool_d]
+
     # -------------------------------------------------------------- forward
     def forward(
         self,
@@ -418,38 +483,67 @@ class TCGNeuralEvaluator(nn.Module):
         """
         Args:
             batch: dict with float32 tensors —
-                global_features  [B, 27]
-                self_characters  [B, 3, 32]
-                oppo_characters  [B, 3, 32]
-                hand_cards       [B, 10, 16]
-                hand_mask        [B, 10]      1 = real, 0 = pad
-                summons          [B, 4, 16]
-                summons_mask     [B, 4]       1 = real, 0 = pad
-                action_mask      [B, 64]      1 = legal, 0 = illegal
+                global_features          [B, 27]
+                self_characters          [B, 3, 32]
+                oppo_characters          [B, 3, 32]
+                hand_cards               [B, 10, 16]
+                hand_mask                [B, 10]       1 = real, 0 = pad
+                summons                  [B, 4, 16]
+                summons_mask             [B, 4]        1 = real, 0 = pad
+                self_supports            [B, 4, 16]
+                self_supports_mask       [B, 4]
+                oppo_supports            [B, 4, 16]
+                oppo_supports_mask       [B, 4]
+                self_combat_statuses     [B, 10, 16]
+                self_combat_statuses_mask[B, 10]
+                oppo_combat_statuses     [B, 10, 16]
+                oppo_combat_statuses_mask[B, 10]
+                self_char_entities       [B, 24, 16]   (3 chars × 8 ent)
+                self_char_entities_mask  [B, 24]
+                oppo_char_entities       [B, 24, 16]
+                oppo_char_entities_mask  [B, 24]
+                action_mask              [B, 128]      1 = legal, 0 = illegal
         Returns:
             ModelOutput(value, log_policy, next_hp, card_play, oppo_belief,
                         kill_pred, reaction_pred, dice_efficiency)
         """
+        # --- character entity pooling → augmented character features ---
+        sc_ent = self._pool_char_entities(
+            batch["self_char_entities"], batch["self_char_entities_mask"],
+        )  # [B, 3, pool_d]
+        oc_ent = self._pool_char_entities(
+            batch["oppo_char_entities"], batch["oppo_char_entities_mask"],
+        )  # [B, 3, pool_d]
+
+        sc_aug = torch.cat([batch["self_characters"], sc_ent], dim=-1).flatten(1)
+        oc_aug = torch.cat([batch["oppo_characters"], oc_ent], dim=-1).flatten(1)
+
         # --- fixed context ---
         g = batch["global_features"]
-        sc = batch["self_characters"].flatten(1)  # [B, 96]
-        oc = batch["oppo_characters"].flatten(1)  # [B, 96]
-        ctx = self.context_mlp(torch.cat([g, sc, oc], dim=-1))  # [B, d_context]
+        ctx = self.context_mlp(torch.cat([g, sc_aug, oc_aug], dim=-1))  # [B, d_context]
 
         # --- embed IDs and replace raw scalar with dense vector ---
-        hand_feats = self._embed_ids(
-            batch["hand_cards"], self.card_id_embed,
-        )
-        summ_feats = self._embed_ids(
-            batch["summons"], self.entity_id_embed,
-        )
+        hand_feats = self._embed_ids(batch["hand_cards"], self.card_id_embed)
+        summ_feats = self._embed_ids(batch["summons"], self.entity_id_embed)
+        self_sup_feats = self._embed_ids(batch["self_supports"], self.entity_id_embed)
+        oppo_sup_feats = self._embed_ids(batch["oppo_supports"], self.entity_id_embed)
+        self_cs_feats = self._embed_ids(batch["self_combat_statuses"], self.entity_id_embed)
+        oppo_cs_feats = self._embed_ids(batch["oppo_combat_statuses"], self.entity_id_embed)
 
         # --- variable sets ---
         h_pool = self.hand_enc(hand_feats, batch["hand_mask"])
         s_pool = self.summon_enc(summ_feats, batch["summons_mask"])
+        self_sup_pool = self.support_enc(self_sup_feats, batch["self_supports_mask"])
+        oppo_sup_pool = self.support_enc(oppo_sup_feats, batch["oppo_supports_mask"])
+        self_cs_pool = self.combat_status_enc(self_cs_feats, batch["self_combat_statuses_mask"])
+        oppo_cs_pool = self.combat_status_enc(oppo_cs_feats, batch["oppo_combat_statuses_mask"])
 
         # --- trunk ---
-        trunk = self.trunk(torch.cat([ctx, h_pool, s_pool], dim=-1))
+        trunk = self.trunk(torch.cat([
+            ctx, h_pool, s_pool,
+            self_sup_pool, oppo_sup_pool,
+            self_cs_pool, oppo_cs_pool,
+        ], dim=-1))
 
         # --- primary heads ---
         value = self.value_head(trunk)
@@ -574,14 +668,19 @@ def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def _rand_entity_block(
+    batch_size: int, slots: int, feat_dim: int, device: str,
+) -> torch.Tensor:
+    t = torch.randn(batch_size, slots, feat_dim, device=device)
+    t[:, :, 0] = torch.randint(0, 5000, (batch_size, slots), device=device).float() / 10000
+    return t
+
+
 def make_dummy_batch(
     batch_size: int = 4, device: str = "cpu"
 ) -> dict[str, torch.Tensor]:
     """Create a random batch for smoke-testing / shape verification."""
-    hand = torch.randn(batch_size, MAX_HAND_CARDS, CARD_FEATURE_DIM, device=device)
-    hand[:, :, 0] = torch.randint(0, 5000, (batch_size, MAX_HAND_CARDS), device=device).float() / 10000
-    summ = torch.randn(batch_size, MAX_SUMMONS, ENTITY_FEATURE_DIM, device=device)
-    summ[:, :, 0] = torch.randint(0, 5000, (batch_size, MAX_SUMMONS), device=device).float() / 10000
+    char_ent_slots = MAX_CHARACTERS * MAX_CHARACTER_ENTITIES  # 24
     return {
         "global_features": torch.randn(batch_size, GLOBAL_FEATURE_DIM, device=device),
         "self_characters": torch.randn(
@@ -590,10 +689,22 @@ def make_dummy_batch(
         "oppo_characters": torch.randn(
             batch_size, MAX_CHARACTERS, CHARACTER_FEATURE_DIM, device=device
         ),
-        "hand_cards": hand,
+        "hand_cards": _rand_entity_block(batch_size, MAX_HAND_CARDS, CARD_FEATURE_DIM, device),
         "hand_mask": torch.ones(batch_size, MAX_HAND_CARDS, device=device),
-        "summons": summ,
+        "summons": _rand_entity_block(batch_size, MAX_SUMMONS, ENTITY_FEATURE_DIM, device),
         "summons_mask": torch.ones(batch_size, MAX_SUMMONS, device=device),
+        "self_supports": _rand_entity_block(batch_size, MAX_SUPPORTS, ENTITY_FEATURE_DIM, device),
+        "self_supports_mask": torch.ones(batch_size, MAX_SUPPORTS, device=device),
+        "oppo_supports": _rand_entity_block(batch_size, MAX_SUPPORTS, ENTITY_FEATURE_DIM, device),
+        "oppo_supports_mask": torch.ones(batch_size, MAX_SUPPORTS, device=device),
+        "self_combat_statuses": _rand_entity_block(batch_size, MAX_COMBAT_STATUSES, ENTITY_FEATURE_DIM, device),
+        "self_combat_statuses_mask": torch.ones(batch_size, MAX_COMBAT_STATUSES, device=device),
+        "oppo_combat_statuses": _rand_entity_block(batch_size, MAX_COMBAT_STATUSES, ENTITY_FEATURE_DIM, device),
+        "oppo_combat_statuses_mask": torch.ones(batch_size, MAX_COMBAT_STATUSES, device=device),
+        "self_char_entities": _rand_entity_block(batch_size, char_ent_slots, ENTITY_FEATURE_DIM, device),
+        "self_char_entities_mask": torch.ones(batch_size, char_ent_slots, device=device),
+        "oppo_char_entities": _rand_entity_block(batch_size, char_ent_slots, ENTITY_FEATURE_DIM, device),
+        "oppo_char_entities_mask": torch.ones(batch_size, char_ent_slots, device=device),
         "action_mask": (
             torch.rand(batch_size, MAX_ACTION_SLOTS, device=device) > 0.5
         ).float(),
@@ -621,6 +732,18 @@ class _OnnxWrapper(nn.Module):
         hand_mask: torch.Tensor,
         summons: torch.Tensor,
         summons_mask: torch.Tensor,
+        self_supports: torch.Tensor,
+        self_supports_mask: torch.Tensor,
+        oppo_supports: torch.Tensor,
+        oppo_supports_mask: torch.Tensor,
+        self_combat_statuses: torch.Tensor,
+        self_combat_statuses_mask: torch.Tensor,
+        oppo_combat_statuses: torch.Tensor,
+        oppo_combat_statuses_mask: torch.Tensor,
+        self_char_entities: torch.Tensor,
+        self_char_entities_mask: torch.Tensor,
+        oppo_char_entities: torch.Tensor,
+        oppo_char_entities_mask: torch.Tensor,
         action_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         batch = {
@@ -631,6 +754,18 @@ class _OnnxWrapper(nn.Module):
             "hand_mask": hand_mask,
             "summons": summons,
             "summons_mask": summons_mask,
+            "self_supports": self_supports,
+            "self_supports_mask": self_supports_mask,
+            "oppo_supports": oppo_supports,
+            "oppo_supports_mask": oppo_supports_mask,
+            "self_combat_statuses": self_combat_statuses,
+            "self_combat_statuses_mask": self_combat_statuses_mask,
+            "oppo_combat_statuses": oppo_combat_statuses,
+            "oppo_combat_statuses_mask": oppo_combat_statuses_mask,
+            "self_char_entities": self_char_entities,
+            "self_char_entities_mask": self_char_entities_mask,
+            "oppo_char_entities": oppo_char_entities,
+            "oppo_char_entities_mask": oppo_char_entities_mask,
             "action_mask": action_mask,
         }
         out = self.inner(batch)
@@ -648,6 +783,18 @@ _INPUT_NAMES = [
     "hand_mask",
     "summons",
     "summons_mask",
+    "self_supports",
+    "self_supports_mask",
+    "oppo_supports",
+    "oppo_supports_mask",
+    "self_combat_statuses",
+    "self_combat_statuses_mask",
+    "oppo_combat_statuses",
+    "oppo_combat_statuses_mask",
+    "self_char_entities",
+    "self_char_entities_mask",
+    "oppo_char_entities",
+    "oppo_char_entities_mask",
     "action_mask",
 ]
 
@@ -700,7 +847,7 @@ if __name__ == "__main__":
     out = model(batch)
 
     print(f"Value shape:      {out.value.shape}")          # [8, 1]
-    print(f"Log-policy shape: {out.log_policy.shape}")      # [8, 64]
+    print(f"Log-policy shape: {out.log_policy.shape}")      # [8, 128]
     print(f"Next-HP shape:    {out.next_hp.shape}")         # [8, 1]
     print(f"Card-play shape:  {out.card_play.shape}")       # [8, 10]
     print(f"Oppo-belief shape:{out.oppo_belief.shape}")     # [8, 16]

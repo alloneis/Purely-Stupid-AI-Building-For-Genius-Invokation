@@ -8,14 +8,16 @@ import type {
 import { MAX_ACTION_SLOTS } from "./constants";
 
 /**
- * Fixed action‑space layout (64 slots):
+ * Fixed action‑space layout (128 slots):
  *
- *   [0]       declareEnd
- *   [1..3]    switchActive to self character position 0 / 1 / 2
- *   [4..18]   useSkill: charPos(0‑2) × skillSlot(0‑4)
- *   [19..48]  playCard: handPos(0‑9) × targetVariant(0‑2)
- *   [49..58]  elementalTuning: handPos(0‑9)
- *   [59..63]  reserved / padding
+ *   [0]        declareEnd
+ *   [1..3]     switchActive to self character position 0 / 1 / 2
+ *   [4..18]    useSkill: charPos(0‑2) × skillSlot(0‑4)
+ *              skillSlot: 0=normal, 1=elemental, 2=burst, 3=technique, 4=equipment
+ *   [19..88]   playCard: handPos(0‑9) × targetVariant(0‑6)
+ *              variant: 0=noTarget, 1‑3=selfChar, 4‑6=oppoChar
+ *   [89..98]   elementalTuning: handPos(0‑9)
+ *   [99..127]  reserved / padding
  */
 
 const IDX_DECLARE_END = 0;
@@ -23,8 +25,8 @@ const IDX_SWITCH_BASE = 1;
 const IDX_SKILL_BASE = 4;
 const SKILL_SLOTS_PER_CHAR = 5;
 const IDX_CARD_BASE = 19;
-const TARGET_VARIANTS = 3;
-const IDX_TUNING_BASE = 49;
+const TARGET_VARIANTS = 7;
+const IDX_TUNING_BASE = 89;
 
 export interface ActionMapping {
   index: number;
@@ -171,24 +173,25 @@ function findSkillSlot(
 ): SkillSlot | null {
   for (let ci = 0; ci < player.characters.length; ci++) {
     const char = player.characters[ci];
-    let initIdx = 0;
 
     for (const skill of char.definition.skills) {
-      if (skill.initiativeSkillConfig !== null) {
-        if (skill.id === skillDefId) {
-          return { charPos: ci, skillPos: Math.min(initIdx, SKILL_SLOTS_PER_CHAR - 1) };
+      if (skill.initiativeSkillConfig !== null && skill.id === skillDefId) {
+        let slot: number;
+        switch (skill.initiativeSkillConfig.skillType) {
+          case "normal":    slot = 0; break;
+          case "elemental": slot = 1; break;
+          case "burst":     slot = 2; break;
+          case "technique": slot = 3; break;
+          default:          slot = 4; break;
         }
-        initIdx++;
+        return { charPos: ci, skillPos: slot };
       }
     }
 
     for (const entity of char.entities) {
       for (const skill of entity.definition.skills) {
-        if (skill.initiativeSkillConfig !== null) {
-          if (skill.id === skillDefId) {
-            return { charPos: ci, skillPos: Math.min(initIdx, SKILL_SLOTS_PER_CHAR - 1) };
-          }
-          initIdx++;
+        if (skill.initiativeSkillConfig !== null && skill.id === skillDefId) {
+          return { charPos: ci, skillPos: 4 };
         }
       }
     }
@@ -206,18 +209,24 @@ function getTargetVariant(
   const firstTarget = targetIds[0];
 
   for (let i = 0; i < selfChars.length; i++) {
-    if (selfChars[i].id === firstTarget) return i % TARGET_VARIANTS;
+    if (selfChars[i].id === firstTarget) return 1 + i; // self char 0-2
   }
   for (let i = 0; i < oppoChars.length; i++) {
-    if (oppoChars[i].id === firstTarget) return i % TARGET_VARIANTS;
+    if (oppoChars[i].id === firstTarget) return 4 + i; // oppo char 0-2
   }
 
-  return Math.abs(firstTarget) % TARGET_VARIANTS;
+  return 0; // non-character target -> no-target slot
 }
 
 /**
  * Decode an action index back to a human-readable description.
  */
+const SKILL_TYPE_NAMES = ["normal", "elemental", "burst", "technique", "equipment"];
+const TARGET_VARIANT_NAMES = [
+  "noTarget", "selfChar0", "selfChar1", "selfChar2",
+  "oppoChar0", "oppoChar1", "oppoChar2",
+];
+
 export function describeActionIndex(index: number): string {
   if (index === IDX_DECLARE_END) return "declareEnd";
 
@@ -229,14 +238,14 @@ export function describeActionIndex(index: number): string {
     const offset = index - IDX_SKILL_BASE;
     const charPos = Math.floor(offset / SKILL_SLOTS_PER_CHAR);
     const skillSlot = offset % SKILL_SLOTS_PER_CHAR;
-    return `useSkill(charPos=${charPos}, skillSlot=${skillSlot})`;
+    return `useSkill(charPos=${charPos}, ${SKILL_TYPE_NAMES[skillSlot] ?? `slot${skillSlot}`})`;
   }
 
   if (index >= IDX_CARD_BASE && index < IDX_TUNING_BASE) {
     const offset = index - IDX_CARD_BASE;
     const handPos = Math.floor(offset / TARGET_VARIANTS);
     const variant = offset % TARGET_VARIANTS;
-    return `playCard(handPos=${handPos}, targetVariant=${variant})`;
+    return `playCard(handPos=${handPos}, ${TARGET_VARIANT_NAMES[variant] ?? `v${variant}`})`;
   }
 
   if (index >= IDX_TUNING_BASE && index < IDX_TUNING_BASE + 10) {

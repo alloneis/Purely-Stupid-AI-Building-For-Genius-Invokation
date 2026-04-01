@@ -30,6 +30,18 @@ REQUIRED_KEYS = {
 }
 
 OPTIONAL_KEYS_DEFAULTS: dict[str, Any] = {
+    "self_supports": [0.0] * (4 * 16),
+    "self_supports_mask": [0.0] * 4,
+    "oppo_supports": [0.0] * (4 * 16),
+    "oppo_supports_mask": [0.0] * 4,
+    "self_combat_statuses": [0.0] * (10 * 16),
+    "self_combat_statuses_mask": [0.0] * 10,
+    "oppo_combat_statuses": [0.0] * (10 * 16),
+    "oppo_combat_statuses_mask": [0.0] * 10,
+    "self_char_entities": [0.0] * (3 * 8 * 16),
+    "self_char_entities_mask": [0.0] * (3 * 8),
+    "oppo_char_entities": [0.0] * (3 * 8 * 16),
+    "oppo_char_entities_mask": [0.0] * (3 * 8),
     "hp_after_5_turns": 0.0,
     "cards_playable_next": [0.0] * 10,
     "oppo_hand_features": [0.0] * 16,

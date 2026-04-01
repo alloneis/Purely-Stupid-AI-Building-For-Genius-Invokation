@@ -103,7 +103,7 @@ def verify_onnx(onnx_path: str) -> None:
     assert -1.0 <= value.min() and value.max() <= 1.0, f"Value out of tanh range"
 
     log_policy = outputs[1]
-    assert log_policy.shape[1] == 64, f"Policy dim mismatch: {log_policy.shape}"
+    assert log_policy.shape[1] == 128, f"Policy dim mismatch: {log_policy.shape}"
 
     policy_probs = np.exp(log_policy)
     prob_sums = policy_probs.sum(axis=-1)

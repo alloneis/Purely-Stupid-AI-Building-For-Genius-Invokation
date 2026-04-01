@@ -24,6 +24,9 @@ import {
   MAX_CHARACTERS,
   MAX_HAND_CARDS,
   MAX_SUMMONS,
+  MAX_SUPPORTS,
+  MAX_COMBAT_STATUSES,
+  MAX_CHARACTER_ENTITIES,
 } from "./constants";
 
 // ─── Portable ONNX Session Interface ───────────────────────────────────
@@ -71,6 +74,10 @@ const NEEDED_OUTPUTS = [OUTPUT_VALUE, OUTPUT_LOG_POLICY] as const;
 const CHAR_FLAT = MAX_CHARACTERS * CHARACTER_FEATURE_DIM;
 const HAND_FLAT = MAX_HAND_CARDS * CARD_FEATURE_DIM;
 const SUMMON_FLAT = MAX_SUMMONS * ENTITY_FEATURE_DIM;
+const SUPPORT_FLAT = MAX_SUPPORTS * ENTITY_FEATURE_DIM;
+const COMBAT_STATUS_FLAT = MAX_COMBAT_STATUSES * ENTITY_FEATURE_DIM;
+const CHAR_ENT_FLAT = MAX_CHARACTERS * MAX_CHARACTER_ENTITIES * ENTITY_FEATURE_DIM;
+const CHAR_ENT_MASK_FLAT = MAX_CHARACTERS * MAX_CHARACTER_ENTITIES;
 
 interface InputSizes {
   global_features: number;
@@ -80,6 +87,18 @@ interface InputSizes {
   hand_mask: number;
   summons: number;
   summons_mask: number;
+  self_supports: number;
+  self_supports_mask: number;
+  oppo_supports: number;
+  oppo_supports_mask: number;
+  self_combat_statuses: number;
+  self_combat_statuses_mask: number;
+  oppo_combat_statuses: number;
+  oppo_combat_statuses_mask: number;
+  self_char_entities: number;
+  self_char_entities_mask: number;
+  oppo_char_entities: number;
+  oppo_char_entities_mask: number;
   action_mask: number;
 }
 
@@ -91,6 +110,18 @@ const SAMPLE_SIZES: InputSizes = {
   hand_mask: MAX_HAND_CARDS,
   summons: SUMMON_FLAT,
   summons_mask: MAX_SUMMONS,
+  self_supports: SUPPORT_FLAT,
+  self_supports_mask: MAX_SUPPORTS,
+  oppo_supports: SUPPORT_FLAT,
+  oppo_supports_mask: MAX_SUPPORTS,
+  self_combat_statuses: COMBAT_STATUS_FLAT,
+  self_combat_statuses_mask: MAX_COMBAT_STATUSES,
+  oppo_combat_statuses: COMBAT_STATUS_FLAT,
+  oppo_combat_statuses_mask: MAX_COMBAT_STATUSES,
+  self_char_entities: CHAR_ENT_FLAT,
+  self_char_entities_mask: CHAR_ENT_MASK_FLAT,
+  oppo_char_entities: CHAR_ENT_FLAT,
+  oppo_char_entities_mask: CHAR_ENT_MASK_FLAT,
   action_mask: MAX_ACTION_SLOTS,
 };
 
@@ -161,6 +192,18 @@ export class BatchedInferenceQueue {
       this.pools.hand_mask.set(encoded.hand_cards_mask, idx * SAMPLE_SIZES.hand_mask);
       this.pools.summons.set(encoded.self_summons, idx * SAMPLE_SIZES.summons);
       this.pools.summons_mask.set(encoded.self_summons_mask, idx * SAMPLE_SIZES.summons_mask);
+      this.pools.self_supports.set(encoded.self_supports, idx * SAMPLE_SIZES.self_supports);
+      this.pools.self_supports_mask.set(encoded.self_supports_mask, idx * SAMPLE_SIZES.self_supports_mask);
+      this.pools.oppo_supports.set(encoded.oppo_supports, idx * SAMPLE_SIZES.oppo_supports);
+      this.pools.oppo_supports_mask.set(encoded.oppo_supports_mask, idx * SAMPLE_SIZES.oppo_supports_mask);
+      this.pools.self_combat_statuses.set(encoded.self_combat_statuses, idx * SAMPLE_SIZES.self_combat_statuses);
+      this.pools.self_combat_statuses_mask.set(encoded.self_combat_statuses_mask, idx * SAMPLE_SIZES.self_combat_statuses_mask);
+      this.pools.oppo_combat_statuses.set(encoded.oppo_combat_statuses, idx * SAMPLE_SIZES.oppo_combat_statuses);
+      this.pools.oppo_combat_statuses_mask.set(encoded.oppo_combat_statuses_mask, idx * SAMPLE_SIZES.oppo_combat_statuses_mask);
+      this.pools.self_char_entities.set(encoded.self_char_entities, idx * SAMPLE_SIZES.self_char_entities);
+      this.pools.self_char_entities_mask.set(encoded.self_char_entities_mask, idx * SAMPLE_SIZES.self_char_entities_mask);
+      this.pools.oppo_char_entities.set(encoded.oppo_char_entities, idx * SAMPLE_SIZES.oppo_char_entities);
+      this.pools.oppo_char_entities_mask.set(encoded.oppo_char_entities_mask, idx * SAMPLE_SIZES.oppo_char_entities_mask);
       this.pools.action_mask.set(actionMask, idx * SAMPLE_SIZES.action_mask);
 
       this.pending.push({ resolve, reject });
@@ -230,6 +273,24 @@ export class BatchedInferenceQueue {
         return [N, MAX_SUMMONS, ENTITY_FEATURE_DIM];
       case "summons_mask":
         return [N, MAX_SUMMONS];
+      case "self_supports":
+      case "oppo_supports":
+        return [N, MAX_SUPPORTS, ENTITY_FEATURE_DIM];
+      case "self_supports_mask":
+      case "oppo_supports_mask":
+        return [N, MAX_SUPPORTS];
+      case "self_combat_statuses":
+      case "oppo_combat_statuses":
+        return [N, MAX_COMBAT_STATUSES, ENTITY_FEATURE_DIM];
+      case "self_combat_statuses_mask":
+      case "oppo_combat_statuses_mask":
+        return [N, MAX_COMBAT_STATUSES];
+      case "self_char_entities":
+      case "oppo_char_entities":
+        return [N, MAX_CHARACTERS * MAX_CHARACTER_ENTITIES, ENTITY_FEATURE_DIM];
+      case "self_char_entities_mask":
+      case "oppo_char_entities_mask":
+        return [N, MAX_CHARACTERS * MAX_CHARACTER_ENTITIES];
       case "action_mask":
         return [N, MAX_ACTION_SLOTS];
     }
@@ -381,6 +442,7 @@ export class NeuralEvaluator {
       .filter((a) => a.validity === ActionValidity.VALID);
     const actionMask = this.indexer.buildMask(legalActions, state.gameState, perspective);
 
+    const CHAR_ENT_SLOTS = MAX_CHARACTERS * MAX_CHARACTER_ENTITIES;
     const feeds: Record<string, OnnxTensor> = {
       global_features: this.tf.create(encoded.global_features, [1, GLOBAL_FEATURE_DIM]),
       self_characters: this.tf.create(encoded.self_characters, [1, MAX_CHARACTERS, CHARACTER_FEATURE_DIM]),
@@ -389,6 +451,18 @@ export class NeuralEvaluator {
       hand_mask: this.tf.create(encoded.hand_cards_mask, [1, MAX_HAND_CARDS]),
       summons: this.tf.create(encoded.self_summons, [1, MAX_SUMMONS, ENTITY_FEATURE_DIM]),
       summons_mask: this.tf.create(encoded.self_summons_mask, [1, MAX_SUMMONS]),
+      self_supports: this.tf.create(encoded.self_supports, [1, MAX_SUPPORTS, ENTITY_FEATURE_DIM]),
+      self_supports_mask: this.tf.create(encoded.self_supports_mask, [1, MAX_SUPPORTS]),
+      oppo_supports: this.tf.create(encoded.oppo_supports, [1, MAX_SUPPORTS, ENTITY_FEATURE_DIM]),
+      oppo_supports_mask: this.tf.create(encoded.oppo_supports_mask, [1, MAX_SUPPORTS]),
+      self_combat_statuses: this.tf.create(encoded.self_combat_statuses, [1, MAX_COMBAT_STATUSES, ENTITY_FEATURE_DIM]),
+      self_combat_statuses_mask: this.tf.create(encoded.self_combat_statuses_mask, [1, MAX_COMBAT_STATUSES]),
+      oppo_combat_statuses: this.tf.create(encoded.oppo_combat_statuses, [1, MAX_COMBAT_STATUSES, ENTITY_FEATURE_DIM]),
+      oppo_combat_statuses_mask: this.tf.create(encoded.oppo_combat_statuses_mask, [1, MAX_COMBAT_STATUSES]),
+      self_char_entities: this.tf.create(encoded.self_char_entities, [1, CHAR_ENT_SLOTS, ENTITY_FEATURE_DIM]),
+      self_char_entities_mask: this.tf.create(encoded.self_char_entities_mask, [1, CHAR_ENT_SLOTS]),
+      oppo_char_entities: this.tf.create(encoded.oppo_char_entities, [1, CHAR_ENT_SLOTS, ENTITY_FEATURE_DIM]),
+      oppo_char_entities_mask: this.tf.create(encoded.oppo_char_entities_mask, [1, CHAR_ENT_SLOTS]),
       action_mask: this.tf.create(actionMask, [1, MAX_ACTION_SLOTS]),
     };
 

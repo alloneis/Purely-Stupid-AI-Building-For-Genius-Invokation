@@ -142,11 +142,11 @@ function encodeCharacter(
         : 0;
 
   f[offset++] = hp / maxHp;
-  f[offset++] = hp / 10;
-  f[offset++] = maxHp / 10;
+  f[offset++] = hp / 15;
+  f[offset++] = maxHp / 15;
   f[offset++] = energy / maxEnergy;
-  f[offset++] = energy / 5;
-  f[offset++] = maxEnergy / 5;
+  f[offset++] = energy / 6;
+  f[offset++] = maxEnergy / 6;
 
   const auraOh = oneHotAura(aura);
   f.set(auraOh, offset);

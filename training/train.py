@@ -4,8 +4,8 @@ train.py — TD(λ) + Prioritized Experience Replay training loop.
 Data contract:
   Each episode is a list of step dicts.  A step dict contains:
     - All keys from NeuralStateEncoder output (float lists)
-    - "action_mask"              : [64]
-    - "mcts_policy"              : [64]   MCTS visit-count distribution
+    - "action_mask"              : [128]
+    - "mcts_policy"              : [128]  MCTS visit-count distribution
     - "reward"                   : float  (0 mid-game, ±1 terminal)
     - "is_terminal"              : bool
     - "hp_after_5_turns"         : float  HP of active char in 5 turns (/ 10)
@@ -61,6 +61,9 @@ from model import (
     MAX_CHARACTERS,
     MAX_HAND_CARDS,
     MAX_SUMMONS,
+    MAX_SUPPORTS,
+    MAX_COMBAT_STATUSES,
+    MAX_CHARACTER_ENTITIES,
     MAX_ACTION_SLOTS,
 )
 
@@ -115,12 +118,21 @@ def _to_tensor(x: Any, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return torch.tensor(x, dtype=dtype)
 
 
+_CHAR_ENT_SLOTS = MAX_CHARACTERS * MAX_CHARACTER_ENTITIES  # 24
+
+
 class EpisodeStep:
     """One decision point within a game episode."""
 
     __slots__ = (
         "global_features", "self_characters", "oppo_characters",
         "hand_cards", "hand_mask", "summons", "summons_mask",
+        "self_supports", "self_supports_mask",
+        "oppo_supports", "oppo_supports_mask",
+        "self_combat_statuses", "self_combat_statuses_mask",
+        "oppo_combat_statuses", "oppo_combat_statuses_mask",
+        "self_char_entities", "self_char_entities_mask",
+        "oppo_char_entities", "oppo_char_entities_mask",
         "action_mask", "mcts_policy", "reward", "is_terminal",
         "hp_after_5_turns", "cards_playable_next", "oppo_hand_features",
         "kill_within_3", "reaction_next_attack", "dice_effective_actions",
@@ -134,6 +146,46 @@ class EpisodeStep:
         self.hand_mask = _to_tensor(raw["hand_mask"])
         self.summons = _to_tensor(raw["summons"]).reshape(MAX_SUMMONS, ENTITY_FEATURE_DIM)
         self.summons_mask = _to_tensor(raw["summons_mask"])
+
+        self.self_supports = _to_tensor(
+            raw.get("self_supports", [0.0] * (MAX_SUPPORTS * ENTITY_FEATURE_DIM))
+        ).reshape(MAX_SUPPORTS, ENTITY_FEATURE_DIM)
+        self.self_supports_mask = _to_tensor(
+            raw.get("self_supports_mask", [0.0] * MAX_SUPPORTS)
+        )
+        self.oppo_supports = _to_tensor(
+            raw.get("oppo_supports", [0.0] * (MAX_SUPPORTS * ENTITY_FEATURE_DIM))
+        ).reshape(MAX_SUPPORTS, ENTITY_FEATURE_DIM)
+        self.oppo_supports_mask = _to_tensor(
+            raw.get("oppo_supports_mask", [0.0] * MAX_SUPPORTS)
+        )
+
+        self.self_combat_statuses = _to_tensor(
+            raw.get("self_combat_statuses", [0.0] * (MAX_COMBAT_STATUSES * ENTITY_FEATURE_DIM))
+        ).reshape(MAX_COMBAT_STATUSES, ENTITY_FEATURE_DIM)
+        self.self_combat_statuses_mask = _to_tensor(
+            raw.get("self_combat_statuses_mask", [0.0] * MAX_COMBAT_STATUSES)
+        )
+        self.oppo_combat_statuses = _to_tensor(
+            raw.get("oppo_combat_statuses", [0.0] * (MAX_COMBAT_STATUSES * ENTITY_FEATURE_DIM))
+        ).reshape(MAX_COMBAT_STATUSES, ENTITY_FEATURE_DIM)
+        self.oppo_combat_statuses_mask = _to_tensor(
+            raw.get("oppo_combat_statuses_mask", [0.0] * MAX_COMBAT_STATUSES)
+        )
+
+        self.self_char_entities = _to_tensor(
+            raw.get("self_char_entities", [0.0] * (_CHAR_ENT_SLOTS * ENTITY_FEATURE_DIM))
+        ).reshape(_CHAR_ENT_SLOTS, ENTITY_FEATURE_DIM)
+        self.self_char_entities_mask = _to_tensor(
+            raw.get("self_char_entities_mask", [0.0] * _CHAR_ENT_SLOTS)
+        )
+        self.oppo_char_entities = _to_tensor(
+            raw.get("oppo_char_entities", [0.0] * (_CHAR_ENT_SLOTS * ENTITY_FEATURE_DIM))
+        ).reshape(_CHAR_ENT_SLOTS, ENTITY_FEATURE_DIM)
+        self.oppo_char_entities_mask = _to_tensor(
+            raw.get("oppo_char_entities_mask", [0.0] * _CHAR_ENT_SLOTS)
+        )
+
         self.action_mask = _to_tensor(raw["action_mask"])
         self.mcts_policy = _to_tensor(raw["mcts_policy"])
         self.reward = float(raw["reward"])
@@ -212,6 +264,18 @@ class EpisodeDataset(Dataset):
                 "hand_mask": step.hand_mask,
                 "summons": step.summons,
                 "summons_mask": step.summons_mask,
+                "self_supports": step.self_supports,
+                "self_supports_mask": step.self_supports_mask,
+                "oppo_supports": step.oppo_supports,
+                "oppo_supports_mask": step.oppo_supports_mask,
+                "self_combat_statuses": step.self_combat_statuses,
+                "self_combat_statuses_mask": step.self_combat_statuses_mask,
+                "oppo_combat_statuses": step.oppo_combat_statuses,
+                "oppo_combat_statuses_mask": step.oppo_combat_statuses_mask,
+                "self_char_entities": step.self_char_entities,
+                "self_char_entities_mask": step.self_char_entities_mask,
+                "oppo_char_entities": step.oppo_char_entities,
+                "oppo_char_entities_mask": step.oppo_char_entities_mask,
                 "action_mask": step.action_mask,
                 "target_policy": step.mcts_policy,
                 "target_value": td_targets[t],
@@ -237,6 +301,18 @@ class EpisodeDataset(Dataset):
             "hand_mask": torch.stack([s.hand_mask for s in steps]).to(device),
             "summons": torch.stack([s.summons for s in steps]).to(device),
             "summons_mask": torch.stack([s.summons_mask for s in steps]).to(device),
+            "self_supports": torch.stack([s.self_supports for s in steps]).to(device),
+            "self_supports_mask": torch.stack([s.self_supports_mask for s in steps]).to(device),
+            "oppo_supports": torch.stack([s.oppo_supports for s in steps]).to(device),
+            "oppo_supports_mask": torch.stack([s.oppo_supports_mask for s in steps]).to(device),
+            "self_combat_statuses": torch.stack([s.self_combat_statuses for s in steps]).to(device),
+            "self_combat_statuses_mask": torch.stack([s.self_combat_statuses_mask for s in steps]).to(device),
+            "oppo_combat_statuses": torch.stack([s.oppo_combat_statuses for s in steps]).to(device),
+            "oppo_combat_statuses_mask": torch.stack([s.oppo_combat_statuses_mask for s in steps]).to(device),
+            "self_char_entities": torch.stack([s.self_char_entities for s in steps]).to(device),
+            "self_char_entities_mask": torch.stack([s.self_char_entities_mask for s in steps]).to(device),
+            "oppo_char_entities": torch.stack([s.oppo_char_entities for s in steps]).to(device),
+            "oppo_char_entities_mask": torch.stack([s.oppo_char_entities_mask for s in steps]).to(device),
             "action_mask": torch.stack([s.action_mask for s in steps]).to(device),
         }
 
@@ -328,7 +404,14 @@ class TrainConfig:
 
 _MODEL_INPUT_KEYS = frozenset((
     "global_features", "self_characters", "oppo_characters",
-    "hand_cards", "hand_mask", "summons", "summons_mask", "action_mask",
+    "hand_cards", "hand_mask", "summons", "summons_mask",
+    "self_supports", "self_supports_mask",
+    "oppo_supports", "oppo_supports_mask",
+    "self_combat_statuses", "self_combat_statuses_mask",
+    "oppo_combat_statuses", "oppo_combat_statuses_mask",
+    "self_char_entities", "self_char_entities_mask",
+    "oppo_char_entities", "oppo_char_entities_mask",
+    "action_mask",
 ))
 
 
@@ -876,6 +959,18 @@ def _make_synthetic_dataset(
                 "hand_mask": [1.0] * MAX_HAND_CARDS,
                 "summons": torch.randn(MAX_SUMMONS * ENTITY_FEATURE_DIM).tolist(),
                 "summons_mask": [1.0] * MAX_SUMMONS,
+                "self_supports": torch.randn(MAX_SUPPORTS * ENTITY_FEATURE_DIM).tolist(),
+                "self_supports_mask": [1.0] * MAX_SUPPORTS,
+                "oppo_supports": torch.randn(MAX_SUPPORTS * ENTITY_FEATURE_DIM).tolist(),
+                "oppo_supports_mask": [1.0] * MAX_SUPPORTS,
+                "self_combat_statuses": torch.randn(MAX_COMBAT_STATUSES * ENTITY_FEATURE_DIM).tolist(),
+                "self_combat_statuses_mask": [1.0] * MAX_COMBAT_STATUSES,
+                "oppo_combat_statuses": torch.randn(MAX_COMBAT_STATUSES * ENTITY_FEATURE_DIM).tolist(),
+                "oppo_combat_statuses_mask": [1.0] * MAX_COMBAT_STATUSES,
+                "self_char_entities": torch.randn(_CHAR_ENT_SLOTS * ENTITY_FEATURE_DIM).tolist(),
+                "self_char_entities_mask": [1.0] * _CHAR_ENT_SLOTS,
+                "oppo_char_entities": torch.randn(_CHAR_ENT_SLOTS * ENTITY_FEATURE_DIM).tolist(),
+                "oppo_char_entities_mask": [1.0] * _CHAR_ENT_SLOTS,
                 "action_mask": action_mask.tolist(),
                 "mcts_policy": mcts_policy.tolist(),
                 "reward": outcome if is_last else 0.0,

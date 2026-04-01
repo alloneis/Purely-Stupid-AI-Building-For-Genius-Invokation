@@ -64,6 +64,18 @@ interface StepRecord {
   hand_mask: number[];
   summons: number[];
   summons_mask: number[];
+  self_supports: number[];
+  self_supports_mask: number[];
+  oppo_supports: number[];
+  oppo_supports_mask: number[];
+  self_combat_statuses: number[];
+  self_combat_statuses_mask: number[];
+  oppo_combat_statuses: number[];
+  oppo_combat_statuses_mask: number[];
+  self_char_entities: number[];
+  self_char_entities_mask: number[];
+  oppo_char_entities: number[];
+  oppo_char_entities_mask: number[];
   action_mask: number[];
   mcts_policy: number[];
   reward: number;
@@ -267,6 +279,18 @@ async function runOneGame(
       hand_mask: f32ToArray(encoded.hand_cards_mask),
       summons: f32ToArray(encoded.self_summons),
       summons_mask: f32ToArray(encoded.self_summons_mask),
+      self_supports: f32ToArray(encoded.self_supports),
+      self_supports_mask: f32ToArray(encoded.self_supports_mask),
+      oppo_supports: f32ToArray(encoded.oppo_supports),
+      oppo_supports_mask: f32ToArray(encoded.oppo_supports_mask),
+      self_combat_statuses: f32ToArray(encoded.self_combat_statuses),
+      self_combat_statuses_mask: f32ToArray(encoded.self_combat_statuses_mask),
+      oppo_combat_statuses: f32ToArray(encoded.oppo_combat_statuses),
+      oppo_combat_statuses_mask: f32ToArray(encoded.oppo_combat_statuses_mask),
+      self_char_entities: f32ToArray(encoded.self_char_entities),
+      self_char_entities_mask: f32ToArray(encoded.self_char_entities_mask),
+      oppo_char_entities: f32ToArray(encoded.oppo_char_entities),
+      oppo_char_entities_mask: f32ToArray(encoded.oppo_char_entities_mask),
       action_mask: f32ToArray(actionMask),
       mcts_policy: mctsPolicy,
       reward: 0,

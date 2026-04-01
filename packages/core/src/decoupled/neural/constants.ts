@@ -81,11 +81,11 @@ export const GLOBAL_FEATURE_DIM =
 
 export const CHARACTER_FEATURE_DIM =
   1 +  // hp (normalized by maxHp)
-  1 +  // hp raw / 10
-  1 +  // maxHp / 10
+  1 +  // hp raw / 15
+  1 +  // maxHp / 15
   1 +  // energy (normalized by maxEnergy)
-  1 +  // energy raw / 5
-  1 +  // maxEnergy / 5
+  1 +  // energy raw / 6
+  1 +  // maxEnergy / 6
   AURA_DIM + // aura one-hot
   1 +  // alive
   1 +  // isActive
@@ -122,4 +122,4 @@ export const ENTITY_FEATURE_DIM =
   1 +  // is shield tag
   1;   // visibleVar value (if any)
 
-export const MAX_ACTION_SLOTS = 64;
+export const MAX_ACTION_SLOTS = 128;
